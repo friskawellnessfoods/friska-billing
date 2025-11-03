@@ -3,12 +3,10 @@
 
 # =========================================================
 # Friska Billing Web App — Streamlit Cloud + Service Account
-# - Sheet URL fixed to user's file
-# - Reads clientlist<month> tabs
-# - Counts meals, snacks, juices, breakfast, seafood, paused
-# - Column G = per-client delivery price (override optional)
-# - Date blocks start at H, 6 columns per date
-# - Robust Secrets handling (JSON string or structured TOML)
+# - Debug panel to diagnose tab names, date headers, client rows
+# - Counts meals/snacks/juices/breakfast/seafood + paused
+# - Column G = delivery price (override used for now)
+# - Date blocks from H, 6 columns per date
 # =========================================================
 
 import streamlit as st
@@ -18,35 +16,31 @@ from typing import Dict, List, Tuple, Optional
 from google.oauth2.service_account import Credentials
 from google.auth.transport.requests import AuthorizedSession
 
-# ---------- SET YOUR SHEET URL ----------
 SHEET_URL = "https://docs.google.com/spreadsheets/d/1CsT6_oYsFjgQQ73pt1Bl1cuXuzKY8JnOTB3E4bDkTiA/edit?usp=sharing"
 
-# ---------- Sheet layout ----------
-DELIVERY_PRICE_COL_IDX = 6   # G (0-based indexing, A=0)
+# layout constants
+DELIVERY_PRICE_COL_IDX = 6   # G
 START_DATA_COL_IDX     = 7   # H
-COLUMNS_PER_BLOCK      = 6   # [Meal1, Meal2, Snack, J1, J2, Breakfast]
+COLUMNS_PER_BLOCK      = 6   # Meal1, Meal2, Snack, J1, J2, Breakfast
 
-# ---------- Scopes ----------
 SCOPES = [
     "https://www.googleapis.com/auth/drive.readonly",
     "https://www.googleapis.com/auth/spreadsheets.readonly",
 ]
 
-# ---------- Settings persistence ----------
 SETTINGS_FILE = "settings.json"
 DEFAULT_SETTINGS = {
     "price_nutri": 180.0,
     "price_high_protein": 200.0,
     "price_seafood_addon": 80.0,
-    "price_delivery_override": 80.0,   # used until we hook per-client G read on web
+    "price_delivery_override": 80.0,
     "gst_percent": 5.0,
 }
 
 def load_settings():
     try:
         with open(SETTINGS_FILE, "r", encoding="utf-8") as f:
-            data = json.load(f)
-            return {**DEFAULT_SETTINGS, **data}
+            return {**DEFAULT_SETTINGS, **json.load(f)}
     except Exception:
         return DEFAULT_SETTINGS.copy()
 
@@ -54,39 +48,29 @@ def save_settings(s: dict):
     with open(SETTINGS_FILE, "w", encoding="utf-8") as f:
         json.dump(s, f, indent=2)
 
-# ---------- Secrets -> Authorized session ----------
+# --------- Secrets -> session (accepts JSON string OR TOML fields) ----------
 def get_service_account_session() -> AuthorizedSession:
-    """
-    Supports two Streamlit Secrets formats:
-    A) [gcp_credentials] value = \"\"\"{...JSON...}\"\"\"
-    B) [gcp_credentials] type="service_account", private_key="...", ...
-    """
     try:
         sec = st.secrets["gcp_credentials"]
-    except Exception as e:
-        st.error("Missing [gcp_credentials] in Secrets. Add it in App → Settings → Secrets.")
+    except Exception:
+        st.error("Secrets missing: Add your Service Account in **Settings → Secrets** as [gcp_credentials].")
         st.stop()
 
     try:
-        # If user pasted JSON inside value = """ ... """
         if isinstance(sec, dict) and "value" in sec and isinstance(sec["value"], str):
             sa_info = json.loads(sec["value"])
         else:
-            # Structured TOML becomes a Mapping already
             sa_info = dict(sec)
         creds = Credentials.from_service_account_info(sa_info, scopes=SCOPES)
         return AuthorizedSession(creds)
     except json.JSONDecodeError:
-        st.error(
-            "Your Secrets value under [gcp_credentials].value is not valid JSON.\n"
-            "Make sure it starts with '{' and ends with '}', and that the private_key contains \\n escapes."
-        )
+        st.error("Secrets format error: your JSON under gcp_credentials.value is not valid. Make sure it starts with '{' and ends with '}'.")
         st.stop()
     except Exception as e:
-        st.error(f"Could not initialize service-account credentials: {e}")
+        st.error(f"Could not initialize Google credentials: {e}")
         st.stop()
 
-# ---------- Small helpers ----------
+# --------- Helpers ----------
 WEEKDAY_PREFIX = re.compile(
     r"^\s*(Mon|Tue|Wed|Thu|Fri|Sat|Sun|Monday|Tuesday|Wednesday|Thursday|Friday|Saturday|Sunday)\s*,\s*",
     re.I
@@ -95,7 +79,7 @@ WEEKDAY_PREFIX = re.compile(
 def get_spreadsheet_id(url: str) -> str:
     m = re.search(r"/spreadsheets/d/([a-zA-Z0-9-_]+)", url)
     if not m:
-        st.error("Invalid SHEET_URL. Paste full Google Sheet link.")
+        st.error("Invalid SHEET_URL.")
         st.stop()
     return m.group(1)
 
@@ -105,11 +89,7 @@ def fetch_values(session: AuthorizedSession, spid: str, a1_range: str) -> List[L
     url = f"https://sheets.googleapis.com/v4/spreadsheets/{spid}/values/{enc}"
     r = session.get(url, params={"valueRenderOption": "UNFORMATTED_VALUE"}, timeout=30)
     if r.status_code == 403:
-        st.error(
-            "Permission denied by Google Sheets API.\n\n"
-            "Share your Sheet with the **service account email** (Viewer):\n"
-            "App → Settings → Secrets → find client_email in your JSON and share to that email."
-        )
+        st.error("Permission denied by Google Sheets API.\nShare the Sheet with the **service account email** (Viewer).")
         st.stop()
     r.raise_for_status()
     return r.json().get("values", []) or []
@@ -124,22 +104,22 @@ def to_dt(v) -> Optional[datetime]:
     for fmt in ("%d-%b-%y", "%d-%b-%Y", "%d/%m/%Y", "%d/%m/%y", "%Y-%m-%d", "%d %b %Y", "%d %b %y"):
         try:
             return datetime.strptime(s, fmt)
-        except Exception:
+        except:
             pass
-    m = re.match(r"^\s*(\d{1,2})\s+([A-Za-z]+)\s*$", s)
+    m = re.match(r"^\s*(\d{1,2})\s+([A-Za-z]+)\s*$", s)   # e.g. '2 Nov'
     if m:
         try:
             month = m.group(2).title()
             y = date.today().year
             return datetime.strptime(f"{m.group(1)}-{month}-{y}", "%d-%b-%Y")
-        except Exception:
+        except:
             return None
     return None
 
 def norm_name(s: str) -> str:
     return re.sub(r"\s+", " ", (s or "").strip()).lower()
 
-def get_clientlist_sheet_title(session: AuthorizedSession, spid: str, month_full: str) -> Optional[str]:
+def get_clientlist_sheet_title(session: AuthorizedSession, spid: str, month_full: str) -> Tuple[Optional[str], List[str]]:
     desired1 = f"clientlist {month_full}".lower()
     desired2 = f"clientlist {month_full[:3]}".lower()
     meta = session.get(f"https://sheets.googleapis.com/v4/spreadsheets/{spid}", timeout=30).json()
@@ -147,11 +127,11 @@ def get_clientlist_sheet_title(session: AuthorizedSession, spid: str, month_full
     for t in titles:
         tl = t.lower().strip()
         if tl == desired1 or tl == desired2:
-            return t
+            return t, titles
     for t in titles:
         if t.lower().startswith("clientlist "):
-            return t
-    return None
+            return t, titles
+    return None, titles
 
 def month_span_inclusive(a: date, b: date) -> List[Tuple[int, int]]:
     out = []
@@ -164,14 +144,19 @@ def month_span_inclusive(a: date, b: date) -> List[Tuple[int, int]]:
             m += 1
     return out
 
-# ---------- Counting logic ----------
-def count_usage(session: AuthorizedSession, spid: str, start: date, end: date, client_name: str):
+# --------- Counting logic (with diagnostics) ----------
+def count_usage(session: AuthorizedSession, spid: str, start: date, end: date, client_name: str, debug: bool=False):
     client_key = norm_name(client_name)
     totals = dict(meal1=0, meal2=0, snack=0, j1=0, j2=0, brk=0, seafood=0, paused=0)
     delivery_days = 0
+    diag = {"months": [], "tabs_checked": [], "dates_seen": {}, "client_found_rows": {}}
 
     for (yy, mm) in month_span_inclusive(start, end):
-        sheet_title = get_clientlist_sheet_title(session, spid, calendar.month_name[mm])
+        month_name = calendar.month_name[mm]
+        sheet_title, all_titles = get_clientlist_sheet_title(session, spid, month_name)
+        diag["months"].append(month_name)
+        diag["tabs_checked"].append({"month": month_name, "resolved_tab": sheet_title, "all_tabs": all_titles})
+
         if not sheet_title:
             continue
 
@@ -185,8 +170,9 @@ def count_usage(session: AuthorizedSession, spid: str, start: date, end: date, c
             name = norm_name(row[1]) if len(row) > 1 else ""
             if name:
                 lut.setdefault(name, []).append(r)
+        diag["client_found_rows"][sheet_title] = lut.get(client_key, [])
 
-        # dates on row 1: H.. stepping by 6
+        # dates on row 1
         row1 = data[0] if data else []
         date_to_block = {}
         c = START_DATA_COL_IDX
@@ -198,20 +184,19 @@ def count_usage(session: AuthorizedSession, spid: str, start: date, end: date, c
                 if date_to_block and (c >= len(row1) or not str(row1[c]).strip()):
                     break
             c += COLUMNS_PER_BLOCK
+        # store sample of parsed dates
+        diag["dates_seen"][sheet_title] = [d.strftime("%d-%b-%y") for d in sorted(date_to_block.keys())[:10]]
 
-        # iterate this month's part of the range
+        # iterate this month's slice
         first_day = date(yy, mm, 1)
-        last_day = date(yy, mm, calendar.monthrange(yy, mm)[1])
+        last_day  = date(yy, mm, calendar.monthrange(yy, mm)[1])
         cur = max(first_day, start)
         stop = min(last_day, end)
 
         while cur <= stop:
             block = date_to_block.get(cur)
-            if block is None:
-                cur += timedelta(days=1); continue
-
             rows = lut.get(client_key, [])
-            if not rows:
+            if block is None or not rows:
                 cur += timedelta(days=1); continue
 
             m1=m2=sn=j1=j2=bk=sf=0
@@ -248,17 +233,15 @@ def count_usage(session: AuthorizedSession, spid: str, start: date, end: date, c
 
     totals["meals_total"]  = totals["meal1"] + totals["meal2"]
     totals["juices_total"] = totals["j1"] + totals["j2"]
-    return totals, delivery_days
+    return totals, delivery_days, diag
 
-# ---------- UI ----------
+# ---------------- UI ----------------
 st.set_page_config(page_title="Friska Billing", page_icon="💼", layout="centered")
 st.title("🥗 Friska Wellness — Billing System")
 
-# auth + spreadsheet id
 session = get_service_account_session()
 spid = get_spreadsheet_id(SHEET_URL)
 
-# sidebar settings
 settings = load_settings()
 with st.sidebar:
     st.header("⚙️ Prices (saved)")
@@ -268,12 +251,11 @@ with st.sidebar:
     settings["price_seafood_addon"] = st.number_input("Seafood add-on (₹)", value=float(settings["price_seafood_addon"]), step=5.0)
     settings["gst_percent"] = st.number_input("GST % (food only)", value=float(settings["gst_percent"]), step=1.0, min_value=0.0)
     settings["price_delivery_override"] = st.number_input("Delivery (₹/service day)", value=float(settings["price_delivery_override"]), step=5.0)
-
+    debug = st.checkbox("Show debug details")
     if st.button("💾 Save settings", use_container_width=True):
         save_settings(settings)
         st.success("Saved.")
 
-# inputs
 cA, cB = st.columns(2)
 client = cA.text_input("Client name")
 today = date.today()
@@ -286,7 +268,21 @@ if st.button("📊 Fetch Usage & Draft Bill", use_container_width=True):
     elif end < start:
         st.error("End date must be on/after start date.")
     else:
-        totals, delivery_days = count_usage(session, spid, start, end, client)
+        try:
+            totals, delivery_days, diag = count_usage(session, spid, start, end, client, debug=debug)
+        except Exception as e:
+            st.error(f"Processing failed: {e}")
+            st.stop()
+
+        # If nothing found, give helpful hints
+        if sum([totals[k] for k in ["meals_total","snack","juices_total","brk"]]) == 0 and delivery_days == 0:
+            st.warning(
+                "No usage found for this client and date range.\n\n"
+                "Tips:\n"
+                "• Check the exact spelling of the client (column B)\n"
+                "• Make sure the tab is named like 'clientlist November' or 'clientlist Nov'\n"
+                "• Row 1 must contain the date in H, then every 6 columns (H, N, T, …)"
+            )
 
         st.subheader("Usage Summary")
         st.write({
@@ -303,8 +299,7 @@ if st.button("📊 Fetch Usage & Draft Bill", use_container_width=True):
             "Service (delivery) days": delivery_days,
         })
 
-        # For now assume Nutri rate; we’ll add auto plan detection from column C next
-        price_meal     = settings["price_nutri"]
+        price_meal     = settings["price_nutri"]      # we’ll auto-detect later
         price_seafood  = settings["price_seafood_addon"]
         gst_pct        = settings["gst_percent"]
         delivery_price = settings["price_delivery_override"]
@@ -324,4 +319,9 @@ if st.button("📊 Fetch Usage & Draft Bill", use_container_width=True):
             "Delivery": f"{delivery_days} × ₹{delivery_price} = ₹{delivery_amount:.2f}",
             "TOTAL": f"₹ {grand_total}",
         })
-        st.success("Draft ready. Next we can wire the PDF invoice button.")
+        st.success("Draft ready. (PDF button comes next.)")
+
+        if debug:
+            st.divider()
+            st.subheader("🔎 Debug details")
+            st.write(diag)
