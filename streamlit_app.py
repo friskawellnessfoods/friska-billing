@@ -6,9 +6,12 @@
 # - Counts meals/snacks/juices/breakfast/seafood + delivery
 # - Delivery from sheet (col G) with custom shift rules
 # - GST applies to meals + seafood + snacks + juices + breakfast
-# - Usage Summary shows Active days, Paused days, Total days
-#   (Total days are counted from header dates present in sheet)
-# - Date blocks from H, 6 columns per date
+# - Usage Summary shows Active/Paused/Total header days
+# - Next Cycle Planner:
+#     * After previous bill range, use header dates only (skip Sundays naturally)
+#     * First paused_days become Adjustment Days
+#     * Next 26 header dates become New Billing Window
+# - Date blocks from H, 6 cols per date; cross-month aware
 # - Debug panel shows delivery decisions and diagnostics
 # =========================================================
 
@@ -55,7 +58,7 @@ def save_settings(s: dict):
     with open(SETTINGS_FILE, "w", encoding="utf-8") as f:
         json.dump(s, f, indent=2)
 
-# --------- Secrets -> session (accepts JSON string OR TOML fields) ----------
+# --------- Secrets -> session ----------
 def get_service_account_session() -> AuthorizedSession:
     try:
         sec = st.secrets["gcp_credentials"]
@@ -70,7 +73,7 @@ def get_service_account_session() -> AuthorizedSession:
         creds = Credentials.from_service_account_info(sa_info, scopes=SCOPES)
         return AuthorizedSession(creds)
     except json.JSONDecodeError:
-        st.error("Secrets format error: your JSON under gcp_credentials.value is not valid.")
+        st.error("Secrets format error under gcp_credentials.value.")
         st.stop()
     except Exception as e:
         st.error(f"Could not initialize Google credentials: {e}")
@@ -149,6 +152,15 @@ def month_span_inclusive(a: date, b: date) -> List[Tuple[int, int]]:
             m += 1
     return out
 
+def month_iter_from(start_month_date: date, max_months: int = 12):
+    y, m = start_month_date.year, start_month_date.month
+    for _ in range(max_months):
+        yield y, m
+        if m == 12:
+            y += 1; m = 1
+        else:
+            m += 1
+
 def parse_float(x) -> float:
     try:
         if x is None: return 0.0
@@ -198,11 +210,11 @@ def compute_delivery_per_day_for_rows(rows: List[int], data: List[List[str]]):
     per_day = max(prices) if prices else 0.0
     return per_day, "single_mismatch", details
 
-# --------- Counting logic (includes delivery & day counts from headers) ----------
+# --------- Count usage in given range (and compute day stats & delivery) ----------
 def count_usage(session: AuthorizedSession, spid: str, start: date, end: date, client_name: str, debug: bool=False):
     client_key = norm_name(client_name)
     totals = dict(meal1=0, meal2=0, snack=0, j1=0, j2=0, brk=0, seafood=0)
-    total_days = 0      # based ONLY on header dates present in sheet
+    total_days = 0      # header dates present in sheet within range
     active_days = 0
     delivery_amount_total = 0.0
 
@@ -256,7 +268,7 @@ def count_usage(session: AuthorizedSession, spid: str, start: date, end: date, c
         # delivery per-day price & mode for this tab
         per_day_delivery, delivery_mode, delivery_details = compute_delivery_per_day_for_rows(client_rows, data)
 
-        # iterate ONLY header dates that are in range (this naturally skips Sundays/closed)
+        # iterate ONLY header dates that are in range
         service_days_this_month = 0
         for d in header_dates_in_range:
             block = date_to_block.get(d)
@@ -310,6 +322,37 @@ def count_usage(session: AuthorizedSession, spid: str, start: date, end: date, c
     paused_days = max(0, total_days - active_days)
     return totals, active_days, paused_days, total_days, delivery_amount_total, diag
 
+# --------- Collect future header dates after a given day ----------
+def collect_future_header_dates(session: AuthorizedSession, spid: str, after_day: date, needed: int) -> List[date]:
+    """
+    Returns up to `needed` header dates strictly after `after_day`,
+    scanning month tabs from `after_day`'s month forward.
+    """
+    out: List[date] = []
+    # start from the SAME month as after_day (because there might be dates later in that month)
+    for yy, mm in month_iter_from(after_day.replace(day=1), max_months=18):
+        month_name = calendar.month_name[mm]
+        sheet_title, _ = get_clientlist_sheet_title(session, spid, month_name)
+        if not sheet_title:
+            continue
+        values = fetch_values(session, spid, f"{sheet_title}!A1:ZZ2000")
+        row1 = values[0] if values else []
+        c = START_DATA_COL_IDX
+        while c < len(row1):
+            dt = to_dt(row1[c]) if c < len(row1) else None
+            if dt:
+                d = dt.date()
+                if d > after_day:
+                    out.append(d)
+                    if len(out) >= needed:
+                        return out
+            else:
+                if len(out) and (c >= len(row1) or not str(row1[c]).strip()):
+                    break
+            c += COLUMNS_PER_BLOCK
+        # continue to next month if not enough yet
+    return out
+
 # ---------------- UI ----------------
 st.set_page_config(page_title="Friska Billing", page_icon="💼", layout="centered")
 st.title("🥗 Friska Wellness — Billing System")
@@ -341,8 +384,8 @@ with st.sidebar:
 cA, cB = st.columns(2)
 client = cA.text_input("Client name")
 today = date.today()
-start = cB.date_input("Start date", value=today.replace(day=1))
-end   = st.date_input("End date", value=today)
+start = cB.date_input("Previous bill: Start date", value=today.replace(day=1))
+end   = st.date_input("Previous bill: End date", value=today)
 
 if st.button("📊 Fetch Usage & Draft Bill", use_container_width=True):
     if not client.strip():
@@ -371,7 +414,7 @@ if st.button("📊 Fetch Usage & Draft Bill", use_container_width=True):
             "Seafood add-on (count)": totals["seafood"],
             "Active days": active_days,
             "Paused days": paused_days,
-            "Total days in range (from sheet headers)": total_days,
+            "Total days in range (from headers)": total_days,
         })
 
         # Billing numbers
@@ -388,10 +431,8 @@ if st.button("📊 Fetch Usage & Draft Bill", use_container_width=True):
         snacks_amount     = totals["snack"]         * price_snack
         breakfast_amount  = totals["brk"]           * price_breakfast
 
-        # GST is on ALL food lines now (delivery excluded)
         taxable_food = food_amount + seafood_amount + juices_amount + snacks_amount + breakfast_amount
         gst_amt      = round(taxable_food * (gst_pct/100.0), 2) if gst_pct else 0.0
-
         grand_total  = round(taxable_food + gst_amt + delivery_amount)
 
         st.subheader("Draft Bill")
@@ -405,7 +446,32 @@ if st.button("📊 Fetch Usage & Draft Bill", use_container_width=True):
             "Delivery (from sheet)": f"₹{delivery_amount:.2f}",
             "TOTAL":           f"₹ {grand_total}",
         })
-        st.success("Draft ready with GST on all food items and sheet-based day counts.")
+
+        # ---------- Next Cycle Planner ----------
+        st.subheader("Next Cycle Planner (26 days after adjusting pauses)")
+        needed_adjust = paused_days
+        needed_bill   = 26
+        future_needed = needed_adjust + needed_bill
+
+        future_dates = collect_future_header_dates(session, spid, end, future_needed)
+
+        if len(future_dates) < future_needed:
+            st.warning(f"Only found {len(future_dates)} future header dates after {end.strftime('%d-%b-%Y')}. "
+                       f"You need {future_needed}. Create the next month's 'clientlist' tab with header dates.")
+        # split into adjustment and new billing
+        adj_dates  = future_dates[:needed_adjust]
+        bill_dates = future_dates[needed_adjust:needed_adjust+needed_bill]
+
+        st.write({
+            "Previous bill range": f"{start.strftime('%d-%b-%Y')} → {end.strftime('%d-%b-%Y')}",
+            "Paused days to adjust": needed_adjust,
+            "Adjustment dates": [d.strftime("%d-%b-%Y") for d in adj_dates],
+            "New bill (26 days) start": bill_dates[0].strftime("%d-%b-%Y") if bill_dates else "—",
+            "New bill (26 days) end": bill_dates[-1].strftime("%d-%b-%Y") if bill_dates else "—",
+            "New bill dates (26)": [d.strftime("%d-%b-%Y") for d in bill_dates],
+        })
+
+        st.success("Next cycle planned. (It uses only header dates, so Sundays are excluded automatically.)")
 
         if debug:
             st.divider()
