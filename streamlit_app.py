@@ -5,13 +5,14 @@
 # Friska Billing Web App — Streamlit Cloud + Service Account
 # - Counts meals/snacks/juices/breakfast/seafood + delivery
 # - Delivery from sheet (col G) with custom shift rules
-# - GST applies to meals + seafood + snacks + juices + breakfast
-# - Usage Summary shows Active/Paused/Total header days (from sheet)
-# - Next Cycle Planner (calendar-based):
-#     * Uses calendar dates AFTER previous end date
-#     * Skips Sundays (Mon–Sat only)
-#     * First paused_days = Adjustment days, next 26 = New billing window
-# - Date blocks from H, 6 cols per date (for usage counting only)
+# - GST settings kept (not used here since Draft Bill removed)
+# - Usage Summary:
+#     * Meals total only (no Meal1/Meal2 split)
+#     * Show Seafood/Snacks/Juices/Breakfast only if > 0
+#     * Show Active, Paused, Total days (from headers) and Paused dates list
+# - Next Cycle Planner (calendar-based, Mon–Sat only):
+#     * First paused_days = Adjustment days (listed)
+#     * Next 26 days = New billing window (show only start & end, not the full list)
 # =========================================================
 
 import streamlit as st
@@ -206,6 +207,7 @@ def count_usage(session: AuthorizedSession, spid: str, start: date, end: date, c
     totals = dict(meal1=0, meal2=0, snack=0, j1=0, j2=0, brk=0, seafood=0)
     total_days = 0      # header dates present in sheet within range
     active_days = 0
+    paused_dates: List[date] = []
     delivery_amount_total = 0.0
 
     diag = {
@@ -235,7 +237,6 @@ def count_usage(session: AuthorizedSession, spid: str, start: date, end: date, c
             if name:
                 lut.setdefault(name, []).append(r)
         client_rows = lut.get(client_key, [])
-        diag["client_found_rows"][sheet_title] = client_rows
 
         # dates on row 1 -> map & collect dates in range for this tab
         row1 = data[0] if data else []
@@ -285,6 +286,8 @@ def count_usage(session: AuthorizedSession, spid: str, start: date, end: date, c
 
             if (m1+m2+sn+j1+j2+bk) > 0:
                 service_days_this_month += 1
+            else:
+                paused_dates.append(d)
 
             totals["meal1"] += m1
             totals["meal2"] += m2
@@ -309,8 +312,8 @@ def count_usage(session: AuthorizedSession, spid: str, start: date, end: date, c
 
     totals["meals_total"]  = totals["meal1"] + totals["meal2"]
     totals["juices_total"] = totals["j1"] + totals["j2"]
-    paused_days = max(0, total_days - active_days)
-    return totals, active_days, paused_days, total_days, delivery_amount_total, diag
+    paused_days = max(0, total_days - active_days)  # should match len(paused_dates)
+    return totals, active_days, paused_days, total_days, paused_dates, delivery_amount_total, diag
 
 # --------- Calendar-based future dates (skip Sundays) ----------
 def next_service_calendar_dates(after_day: date, needed: int) -> List[date]:
@@ -360,66 +363,41 @@ today = date.today()
 start = cB.date_input("Previous bill: Start date", value=today.replace(day=1))
 end   = st.date_input("Previous bill: End date", value=today)
 
-if st.button("📊 Fetch Usage & Draft Bill", use_container_width=True):
+if st.button("📊 Fetch Usage", use_container_width=True):
     if not client.strip():
         st.error("Enter client name.")
     elif end < start:
         st.error("End date must be on/after start date.")
     else:
         try:
-            totals, active_days, paused_days, total_days, delivery_amount, diag = count_usage(
-                session, spid, start, end, client, debug=debug
-            )
+            (totals, active_days, paused_days, total_days,
+             paused_dates, delivery_amount, diag) = count_usage(
+                 session, spid, start, end, client, debug=debug
+             )
         except Exception as e:
             st.error(f"Processing failed: {e}")
             st.stop()
 
+        # ----- Usage Summary (formatted with conditional parts) -----
         st.subheader("Usage Summary")
-        st.write({
-            "Meals total": totals["meals_total"],
-            "  - Meal1": totals["meal1"],
-            "  - Meal2": totals["meal2"],
-            "Snacks total": totals["snack"],
-            "Juices total": totals["juices_total"],
-            "  - Juice1": totals["j1"],
-            "  - Juice2": totals["j2"],
-            "Breakfast total": totals["brk"],
-            "Seafood add-on (count)": totals["seafood"],
-            "Active days": active_days,
-            "Paused days": paused_days,
-            "Total days in range (from headers)": total_days,
-        })
+        lines = []
+        lines.append(f"- **Meals total:** {totals['meals_total']}")
+        if totals["seafood"] > 0:
+            lines.append(f"- **Seafood add-on (count):** {totals['seafood']}")
+        if totals["snack"] > 0:
+            lines.append(f"- **Snacks total:** {totals['snack']}")
+        if totals["juices_total"] > 0:
+            lines.append(f"- **Juices total:** {totals['juices_total']} (J1: {totals['j1']}, J2: {totals['j2']})")
+        if totals["brk"] > 0:
+            lines.append(f"- **Breakfast total:** {totals['brk']}")
+        lines.append(f"- **Active days:** {active_days}")
+        lines.append(f"- **Paused days:** {paused_days}")
+        lines.append(f"- **Total days in range (from headers):** {total_days}")
 
-        # Billing numbers
-        price_meal      = settings["price_nutri"]          # plan auto-detect later
-        price_seafood   = settings["price_seafood_addon"]
-        price_juice     = settings["price_juice"]
-        price_snack     = settings["price_snack"]
-        price_breakfast = settings["price_breakfast"]
-        gst_pct         = settings["gst_percent"]
+        st.markdown("\n".join(lines))
 
-        food_amount       = totals["meals_total"]   * price_meal
-        seafood_amount    = totals["seafood"]       * price_seafood
-        juices_amount     = totals["juices_total"]  * price_juice
-        snacks_amount     = totals["snack"]         * price_snack
-        breakfast_amount  = totals["brk"]           * price_breakfast
-
-        # GST on all food items (delivery excluded)
-        taxable_food = food_amount + seafood_amount + juices_amount + snacks_amount + breakfast_amount
-        gst_amt      = round(taxable_food * (gst_pct/100.0), 2) if gst_pct else 0.0
-        grand_total  = round(taxable_food + gst_amt + delivery_amount)
-
-        st.subheader("Draft Bill")
-        st.write({
-            "Food base":       f"{totals['meals_total']} × ₹{price_meal} = ₹{food_amount:.2f}",
-            "Seafood add-on":  f"{totals['seafood']} × ₹{price_seafood} = ₹{seafood_amount:.2f}",
-            "Juices":          f"{totals['juices_total']} × ₹{price_juice} = ₹{juices_amount:.2f}",
-            "Snacks":          f"{totals['snack']} × ₹{price_snack} = ₹{snacks_amount:.2f}",
-            "Breakfast":       f"{totals['brk']} × ₹{price_breakfast} = ₹{breakfast_amount:.2f}",
-            "GST":             f"₹{gst_amt:.2f} (@ {gst_pct}%)",
-            "Delivery (from sheet)": f"₹{delivery_amount:.2f}",
-            "TOTAL":           f"₹ {grand_total}",
-        })
+        # Paused dates list
+        st.markdown("**Paused dates:** " + (", ".join(sorted({d.strftime('%d-%b-%Y') for d in paused_dates})) if paused_dates else "None"))
 
         # ---------- Next Cycle Planner (calendar-based, skip Sundays) ----------
         st.subheader("Next Cycle Planner (26 days; Sundays excluded)")
@@ -437,14 +415,12 @@ if st.button("📊 Fetch Usage & Draft Bill", use_container_width=True):
             "Adjustment dates": [d.strftime("%d-%b-%Y") for d in adj_dates],
             "New bill (26 days) start": bill_dates[0].strftime("%d-%b-%Y") if bill_dates else "—",
             "New bill (26 days) end": bill_dates[-1].strftime("%d-%b-%Y") if bill_dates else "—",
-            "New bill dates (26)": [d.strftime("%d-%b-%Y") for d in bill_dates],
+            # Intentionally NOT listing the 26 dates
         })
 
-        st.success("Next cycle planned using calendar dates (Mon–Sat only).")
+        st.success("Usage and next cycle planned.")
 
         if debug:
             st.divider()
             st.subheader("🔎 Delivery decision by month")
             st.write(diag.get("delivery_by_month", []))
-            st.subheader("🔎 Other debug")
-            st.write({k: v for k, v in diag.items() if k != "delivery_by_month"})
