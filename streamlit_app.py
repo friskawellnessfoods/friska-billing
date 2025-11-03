@@ -2,16 +2,13 @@
 # -*- coding: utf-8 -*-
 
 # =========================================================
-# Friska Billing – Stable state + Right Admin (collapsible)
-# - Uses st.session_state so Admin edits don't reset results
-# - Right Admin expander (no prices/GST here)
-# - Left Prices console persists prices + GST
-# - BillingCycle update bug fixed (correct row range)
-# - On-page invoice preview + optional PDF (template-based)
+# Friska Billing – Dual consoles (Left=Prices, Right=Admin),
+# Center stage (Usage/Planner + Buttons + Full-width Preview)
+# Stable state + BillingCycle update/append
 # =========================================================
 
 import streamlit as st
-import re, json, io, calendar
+import re, json, io, os, calendar
 from datetime import datetime, timedelta, date
 from typing import Dict, List, Tuple, Optional
 from google.oauth2.service_account import Credentials
@@ -20,7 +17,7 @@ from PIL import Image, ImageDraw, ImageFont
 
 # ---------- CONFIG ----------
 SHEET_URL = "https://docs.google.com/spreadsheets/d/1CsT6_oYsFjgQQ73pt1Bl1cuXuzKY8JnOTB3E4bDkTiA/edit?usp=sharing"
-BILLING_TAB = "BillingCycle"   # headers: Client | Start | End
+BILLING_TAB = "BillingCycle"   # headers row1: Client | Start | End
 
 # Clientlist layout
 COL_B_CLIENT = 1
@@ -29,7 +26,6 @@ COL_G_DELIVERY = 6
 START_DATA_COL_IDX = 7   # H
 COLUMNS_PER_BLOCK  = 6   # Meal1, Meal2, Snack, J1, J2, Breakfast
 
-# Need WRITE scope (update/append BillingCycle)
 SCOPES = [
     "https://www.googleapis.com/auth/spreadsheets",
     "https://www.googleapis.com/auth/drive.readonly",
@@ -85,7 +81,7 @@ LAYOUT = {
     }
 }
 
-# ---------- Secrets / Auth ----------
+# ---------- Auth ----------
 def get_service_account_session() -> AuthorizedSession:
     try:
         sec = st.secrets["gcp_credentials"]
@@ -326,16 +322,14 @@ def get_prev_cycle_for_client(session: AuthorizedSession, spid: str, client_name
     sd = to_dt(last_row[si]); ed = to_dt(last_row[ei])
     if not sd or not ed:
         raise RuntimeError(f"Invalid Start/End for '{client_name}' in '{BILLING_TAB}'. Use dates like 02-Nov-2025.")
-    # Return actual sheet row number (2..N). DO NOT add +1 again later.
-    return sd.date(), ed.date(), last_row_index + 1
+    return sd.date(), ed.date(), last_row_index + 1  # actual sheet row number
 
 def append_cycle_row(session: AuthorizedSession, spid: str, client, start, end):
     row = [client, dtstr(start), dtstr(end)]
     return append_values(session, spid, BILLING_TAB, [row])
 
 def update_cycle_row(session: AuthorizedSession, spid: str, sheet_row_number: int, client, start, end):
-    # FIX: use the row number directly (no +1)
-    range_a1 = f"{BILLING_TAB}!A{sheet_row_number}:C{sheet_row_number}"
+    range_a1 = f"{BILLING_TAB}!A{sheet_row_number}:C{sheet_row_number}"  # exact row
     rows = [[client, dtstr(start), dtstr(end)]]
     return update_values(session, spid, range_a1, rows)
 
@@ -358,8 +352,7 @@ def _draw_text(draw: ImageDraw.ImageDraw, text: str, xy_px: Tuple[int,int], font
 def try_load_template() -> Optional[Image.Image]:
     for p in TEMPLATE_CANDIDATES:
         try:
-            img = Image.open(p).convert("RGB")
-            return img
+            return Image.open(p).convert("RGB")
         except Exception:
             continue
     return None
@@ -373,8 +366,6 @@ def render_invoice_image(template: Image.Image, fields: Dict[str, str], rows: Li
     draw = ImageDraw.Draw(img)
     W, H = img.size
     base_px = max(12, int(LAYOUT["fonts"]["scale"] * H))
-    f_reg = _pick_font(LAYOUT["fonts"]["regular"], base_px)
-    f_bold = _pick_font(LAYOUT["fonts"]["bold"],    int(base_px*1.1))
     for key, spec in LAYOUT["header"].items():
         val = fields.get(key, "")
         if not val: continue
@@ -413,40 +404,18 @@ def render_invoice_image(template: Image.Image, fields: Dict[str, str], rows: Li
 
 def image_to_pdf_bytes(img: Image.Image) -> bytes:
     buf = io.BytesIO()
-    img_rgb = img.convert("RGB")
-    img_rgb.save(buf, format="PDF")
+    img.convert("RGB").save(buf, format="PDF")
     return buf.getvalue()
 
 # ---------------- APP ----------------
-st.set_page_config(page_title="Friska Billing", page_icon="💼", layout="wide")
-st.title("🥗 Friska Wellness — Billing System")
+st.set_page_config(page_title="Friska Billing", page_icon="🥗", layout="wide")
+st.markdown("<h2 style='margin-bottom:0'>Friska Wellness — Billing System</h2>", unsafe_allow_html=True)
 
 session = get_service_account_session()
 spid = get_spreadsheet_id(SHEET_URL)
 
-# ---------- LEFT: Prices console ----------
-settings = load_settings()
-with st.sidebar:
-    st.header("⚙️ Prices (saved)")
-    c1, c2 = st.columns(2)
-    settings["price_nutri"] = c1.number_input("Nutri (₹)", value=float(settings["price_nutri"]), step=5.0, key="p_nutri")
-    settings["price_high_protein"] = c2.number_input("High Protein (₹)", value=float(settings["price_high_protein"]), step=5.0, key="p_hp")
-    settings["price_seafood_addon"] = st.number_input("Seafood add-on (₹)", value=float(settings["price_seafood_addon"]), step=5.0, key="p_sea")
-
-    st.markdown("**Add-ons**")
-    c3, c4, c5 = st.columns(3)
-    settings["price_juice"] = c3.number_input("Juice (₹)", value=float(settings["price_juice"]), step=5.0, key="p_juice")
-    settings["price_snack"] = c4.number_input("Snack (₹)", value=float(settings["price_snack"]), step=5.0, key="p_snack")
-    settings["price_breakfast"] = c5.number_input("Breakfast (₹)", value=float(settings["price_breakfast"]), step=5.0, key="p_brk")
-
-    settings["gst_percent"] = st.number_input("GST % (food only; delivery excluded)", value=float(settings["gst_percent"]), step=1.0, min_value=0.0, key="gst")
-
-    if st.button("💾 Save settings", use_container_width=True):
-        save_settings(settings)
-        st.success("Saved.")
-
-# ---------- Initialize session state ----------
-for k, v in {
+# ---------- Init session state ----------
+defaults = {
     "fetched": False,
     "client": "",
     "prev_start": None,
@@ -460,17 +429,34 @@ for k, v in {
     "paused_days": 0,
     "total_days": 0,
     "paused_dates": [],
-}.items():
+    "admin_invoice_no": "",
+}
+for k, v in defaults.items():
     if k not in st.session_state:
         st.session_state[k] = v
 
-# ---------- MAIN: Client + Fetch ----------
-cA, cB = st.columns([2, 1])
-client_in = cA.text_input("Client name (must exist in BillingCycle)", value=st.session_state["client"])
-save_mode = cB.selectbox("Save mode", ["Update latest row", "Append new row"], key="save_mode")
+# ---------- 3-column layout ----------
+left_col, mid_col, right_col = st.columns([1, 2, 1])
 
-fetch_btn = st.button("📊 Fetch Usage & Plan", use_container_width=True)
+# LEFT CONSOLE (Prices)
+with left_col:
+    st.markdown("### ⚙️ Prices")
+    settings = load_settings()
+    c1, c2 = st.columns(2)
+    settings["price_nutri"] = c1.number_input("Nutri (₹)", value=float(settings["price_nutri"]), step=5.0, key="p_nutri")
+    settings["price_high_protein"] = c2.number_input("High Protein (₹)", value=float(settings["price_high_protein"]), step=5.0, key="p_hp")
+    settings["price_seafood_addon"] = st.number_input("Seafood add-on (₹)", value=float(settings["price_seafood_addon"]), step=5.0, key="p_sea")
+    st.markdown("**Add-ons**")
+    c3, c4, c5 = st.columns(3)
+    settings["price_juice"] = c3.number_input("Juice (₹)", value=float(settings["price_juice"]), step=5.0, key="p_juice")
+    settings["price_snack"] = c4.number_input("Snack (₹)", value=float(settings["price_snack"]), step=5.0, key="p_snack")
+    settings["price_breakfast"] = c5.number_input("Breakfast (₹)", value=float(settings["price_breakfast"]), step=5.0, key="p_brk")
+    settings["gst_percent"] = st.number_input("GST % (food only)", value=float(settings["gst_percent"]), step=1.0, min_value=0.0, key="gst")
+    if st.button("💾 Save", use_container_width=True, key="save_prices"):
+        save_settings(settings)
+        st.success("Saved.")
 
+# helpers for logic
 def do_fetch(client_name: str):
     prev_start, prev_end, last_row_number = get_prev_cycle_for_client(session, spid, client_name)
     (totals, active_days, paused_days, total_days,
@@ -499,146 +485,174 @@ def do_fetch(client_name: str):
         "paused_dates": paused_dates,
     })
 
-if fetch_btn:
-    if not client_in.strip():
-        st.error("Enter client name.")
-        st.stop()
-    try:
-        do_fetch(client_in.strip())
-    except Exception as e:
-        st.error(str(e))
-        st.stop()
+def money(n): 
+    try: return f"₹{round(float(n))}"
+    except: return "₹0"
 
-# ----- Show results if fetched -----
-if st.session_state["fetched"]:
-    totals = st.session_state["totals"]
-    st.subheader("Usage Summary")
-    lines = []
-    lines.append(f"- **Meals total:** {totals.get('meals_total',0)}")
-    if totals.get("seafood",0) > 0: lines.append(f"- **Seafood add-on (count):** {totals['seafood']}")
-    if totals.get("snack",0) > 0: lines.append(f"- **Snacks total:** {totals['snack']}")
-    if totals.get("juices_total",0) > 0:
-        lines.append(f"- **Juices total:** {totals['juices_total']} (J1: {totals.get('j1',0)}, J2: {totals.get('j2',0)})")
-    if totals.get("brk",0) > 0: lines.append(f"- **Breakfast total:** {totals['brk']}")
-    lines.append(f"- **Active days:** {st.session_state['active_days']}")
-    lines.append(f"- **Paused days:** {st.session_state['paused_days']}")
-    lines.append(f"- **Total days:** {st.session_state['total_days']}")
-    st.markdown("\n".join(lines))
-    st.markdown("**Paused dates:** " + (", ".join(sorted({d.strftime('%d-%b-%Y') for d in st.session_state['paused_dates']})) if st.session_state['paused_dates'] else "None"))
-
-    st.subheader("Next Cycle Planner")
-    nl = []
-    nl.append(f"- **Previous bill range:** {dtstr(st.session_state['prev_start'])} → {dtstr(st.session_state['prev_end'])}")
-    nl.append(f"- **Paused days to adjust:** {st.session_state['paused_days']}")
-    # show individual adjustment dates (you asked earlier for count + list)
-    adj_needed = st.session_state['paused_days']
-    if adj_needed:
-        future_dates = next_service_calendar_dates(st.session_state['prev_end'], adj_needed)
-        nl.append(f"- **Adjustment dates:** " + ", ".join(dtstr(d) for d in future_dates))
-    else:
-        nl.append(f"- **Adjustment dates:** None")
-    nl.append(f"- **New bill start:** {dtstr(st.session_state['next_start']) if st.session_state['next_start'] else '—'}")
-    nl.append(f"- **New bill end:** {dtstr(st.session_state['next_end']) if st.session_state['next_end'] else '—'}")
-    st.markdown("\n".join(nl))
-
-    # Save next cycle (update or append)
-    colx, coly = st.columns(2)
-    if st.session_state["next_start"] and st.session_state["next_end"]:
-        if colx.button("✅ Save next cycle to BillingCycle", use_container_width=True, key="save_cycle"):
+# CENTER STAGE (main content)
+with mid_col:
+    st.markdown("### Workflow")
+    cA, cB = st.columns([3, 1])
+    client_in = cA.text_input("Client (exists in BillingCycle)", value=st.session_state["client"])
+    save_mode = cB.selectbox("Save mode", ["Update latest row", "Append new row"], key="save_mode")
+    if st.button("📊 Fetch Usage & Plan", use_container_width=True, key="btn_fetch"):
+        if not client_in.strip():
+            st.error("Enter client name.")
+        else:
             try:
-                if st.session_state["save_mode"] == "Update latest row":
-                    update_cycle_row(session, spid, st.session_state["last_row_number"],
-                                     st.session_state["client"], st.session_state["next_start"], st.session_state["next_end"])
-                    st.success(f"Updated: {st.session_state['client']} | {dtstr(st.session_state['next_start'])} → {dtstr(st.session_state['next_end'])}")
-                else:
-                    append_cycle_row(session, spid, st.session_state["client"],
-                                     st.session_state["next_start"], st.session_state["next_end"])
-                    st.success(f"Appended: {st.session_state['client']} | {dtstr(st.session_state['next_start'])} → {dtstr(st.session_state['next_end'])}")
+                do_fetch(client_in.strip())
+                st.success("Fetched.")
             except Exception as e:
-                st.error(f"Failed to save: {e}")
-    st.info(f"Per-day delivery (from last cycle logic): ₹{st.session_state['delivery_per_day']:.2f}")
+                st.error(str(e))
 
-# ---------- RIGHT: Admin (collapsible) ----------
-st.markdown("---")
-right_col = st.columns([2,1])[1]
-with right_col:
-    with st.expander("🛠️ Admin — Upcoming Bill (Preview & Output)", expanded=False):
-        # Admin fields (no prices/GST here; they are in sidebar)
-        admin_client_label = st.text_input("Client label (print as)", value=(st.session_state["client"] or ""), key="adm_client_lbl")
-        admin_billing_date = st.date_input("Billing date", value=date.today(), key="adm_bill_date")
-
-        bill_start_str = dtstr(st.session_state["next_start"]) if st.session_state["next_start"] else ""
-        bill_end_str   = dtstr(st.session_state["next_end"]) if st.session_state["next_end"] else ""
-        admin_bill_start = st.text_input("Bill start (dd-MMM-YYYY)", value=bill_start_str, key="adm_start")
-        admin_bill_end   = st.text_input("Bill end (dd-MMM-YYYY)",   value=bill_end_str, key="adm_end")
-
-        admin_invoice_no  = st.text_input("Invoice No.", value="", key="adm_invno")
-        admin_duration    = st.text_input("Bill duration text", value=(f"from {bill_start_str} to {bill_end_str}" if (bill_start_str and bill_end_str) else ""), key="adm_dur")
-
-        st.markdown("**Quantities (rates & GST on left panel)**")
-        c1, c2 = st.columns(2)
-        meals_qty  = c1.number_input("Meals qty", value=26, step=1, min_value=0, key="q_meals")
-        delivery_days = c2.number_input("Delivery days", value=26, step=1, min_value=0, key="q_delivdays")
-
-        c3, c4, c5 = st.columns(3)
-        seafood_qty  = c3.number_input("Seafood qty", value=26, step=1, min_value=0, key="q_sea")
-        juice_qty    = c4.number_input("Juice qty", value=26, step=1, min_value=0, key="q_juice")
-        snack_qty    = c5.number_input("Snack qty", value=26, step=1, min_value=0, key="q_snack")
-
-        c6, c7 = st.columns(2)
-        breakfast_qty  = c6.number_input("Breakfast qty", value=26, step=1, min_value=0, key="q_brk")
-        delivery_per_day = c7.number_input("Delivery per day (₹)", value=float(st.session_state["delivery_per_day"]), step=5.0, key="rate_deliv")
-
-        # Compute numbers using LEFT prices + GST
-        def add_line(desc, qty, rate):
-            price = round(qty * rate)
-            return {"desc": desc, "qty": qty if qty else "", "rate": f"{int(rate)}" if rate else "", "price": f"{price}" if price else ""}, price
-
+    if st.session_state["fetched"]:
+        totals = st.session_state["totals"]
+        st.markdown("#### Usage Summary")
         lines = []
-        food_subtotal = 0
-        l, p = add_line("Meal Plan", meals_qty, settings["price_high_protein"] if settings["price_high_protein"]>settings["price_nutri"] else settings["price_nutri"]); lines.append(l); food_subtotal += p
-        l, p = add_line("Seafood add-on", seafood_qty, settings["price_seafood_addon"]); lines.append(l); food_subtotal += p
-        l, p = add_line("Juice", juice_qty, settings["price_juice"]); lines.append(l); food_subtotal += p
-        l, p = add_line("Snack", snack_qty, settings["price_snack"]); lines.append(l); food_subtotal += p
-        l, p = add_line("Breakfast", breakfast_qty, settings["price_breakfast"]); lines.append(l); food_subtotal += p
+        lines.append(f"- **Meals total:** {totals.get('meals_total',0)}")
+        if totals.get("seafood",0) > 0: lines.append(f"- **Seafood add-on (count):** {totals['seafood']}")
+        if totals.get("snack",0) > 0: lines.append(f"- **Snacks total:** {totals['snack']}")
+        if totals.get("juices_total",0) > 0:
+            lines.append(f"- **Juices total:** {totals['juices_total']} (J1: {totals.get('j1',0)}, J2: {totals.get('j2',0)})")
+        if totals.get("brk",0) > 0: lines.append(f"- **Breakfast total:** {totals['brk']}")
+        lines.append(f"- **Active days:** {st.session_state['active_days']}")
+        lines.append(f"- **Paused days:** {st.session_state['paused_days']}")
+        lines.append(f"- **Total days:** {st.session_state['total_days']}")
+        st.markdown("\n".join(lines))
+        st.markdown("**Paused dates:** " + (", ".join(sorted({d.strftime('%d-%b-%Y') for d in st.session_state['paused_dates']})) if st.session_state['paused_dates'] else "None"))
 
-        gst_amount = round(food_subtotal * (settings["gst_percent"]/100.0)) if settings["gst_percent"] else 0
-        delivery_amount = round(delivery_days * delivery_per_day) if (delivery_days and delivery_per_day) else 0
-        grand_total = round(food_subtotal + gst_amount + delivery_amount)
+        st.markdown("#### Next Cycle Planner")
+        nl = []
+        nl.append(f"- **Previous bill range:** {dtstr(st.session_state['prev_start'])} → {dtstr(st.session_state['prev_end'])}")
+        nl.append(f"- **Paused days to adjust:** {st.session_state['paused_days']}")
+        # show individual adjustment dates (count + list)
+        adj_needed = st.session_state['paused_days']
+        if adj_needed:
+            future_dates = next_service_calendar_dates(st.session_state['prev_end'], adj_needed)
+            nl.append(f"- **Adjustment dates:** " + ", ".join(dtstr(d) for d in future_dates))
+        else:
+            nl.append(f"- **Adjustment dates:** None")
+        nl.append(f"- **New bill start:** {dtstr(st.session_state['next_start']) if st.session_state['next_start'] else '—'}")
+        nl.append(f"- **New bill end:** {dtstr(st.session_state['next_end']) if st.session_state['next_end'] else '—'}")
+        st.markdown("\n".join(nl))
 
-        # Preview / PDF
-        cprev, cpdf = st.columns(2)
-        do_preview = cprev.button("🖼️ Generate Invoice Preview", use_container_width=True, key="btn_prev")
-        do_pdf     = cpdf.button("⬇️ Download PDF", use_container_width=True, key="btn_pdf")
+        c1, c2 = st.columns(2)
+        if st.session_state["next_start"] and st.session_state["next_end"]:
+            if c1.button("✅ Save Next Cycle to BillingCycle", use_container_width=True, key="save_cycle"):
+                try:
+                    if st.session_state["save_mode"] == "Update latest row":
+                        update_cycle_row(session, spid, st.session_state["last_row_number"],
+                                         st.session_state["client"], st.session_state["next_start"], st.session_state["next_end"])
+                        st.success(f"Updated: {st.session_state['client']} | {dtstr(st.session_state['next_start'])} → {dtstr(st.session_state['next_end'])}")
+                    else:
+                        append_cycle_row(session, spid, st.session_state["client"],
+                                         st.session_state["next_start"], st.session_state["next_end"])
+                        st.success(f"Appended: {st.session_state['client']} | {dtstr(st.session_state['next_start'])} → {dtstr(st.session_state['next_end'])}")
+                except Exception as e:
+                    st.error(f"Failed to save: {e}")
 
-        fields = {
-            "invoice_no": admin_invoice_no.strip(),
-            "bill_date": admin_billing_date.strftime("%d-%b-%Y"),
-            "client": admin_client_label.strip() or (st.session_state["client"] or ""),
-            "duration": admin_duration.strip(),
-            "gst_value": f"₹{gst_amount}",
-            "total_value": f"₹{grand_total}",
-        }
+        # ===== Middle: Invoice buttons + full-width PREVIEW =====
+        st.markdown("---")
+        st.markdown("### Invoice")
+        colp, cold = st.columns(2)
+        do_preview = colp.button("🖼️ Generate Preview", use_container_width=True, key="btn_preview")
+        do_pdf     = cold.button("⬇️ Download PDF", use_container_width=True, key="btn_pdf")
 
-        template_img = None
-        if (do_preview or do_pdf):
-            template_img = next((Image.open(p).convert("RGB") for p in TEMPLATE_CANDIDATES if (lambda path: __import__('os').path.exists(path))(p)), None)
-            if template_img is None:
-                st.error("Template PNG not found. Add `invoice_template_a4.png` (or `assets/...`).")
+        # Build invoice rows from RIGHT admin and LEFT prices
+        # (right admin values are in session_state keys set below)
+        if st.session_state["fetched"]:
+            price_meal = settings["price_high_protein"] if st.session_state.get("admin_plan","Nutri")=="High Protein" else settings["price_nutri"]
+            lines_for_preview = []
 
-        if template_img is not None and (do_preview or do_pdf):
-            visible_rows = [r for r in lines if (r["qty"] or r["price"])]
-            if not visible_rows:
-                visible_rows = [{"desc":"Meal Plan","qty":"","rate":"","price":""}]
-            inv_img = render_invoice_image(template_img, fields, visible_rows)
-            if do_preview:
-                st.image(inv_img, caption="Invoice Preview", use_column_width=True)
-            if do_pdf:
-                pdf_bytes = image_to_pdf_bytes(inv_img)
-                st.download_button(
-                    "Download Invoice PDF",
-                    data=pdf_bytes,
-                    file_name=f"Invoice_{(st.session_state['client'] or 'Client').replace(' ','_')}_{date.today().strftime('%Y%m%d')}.pdf",
-                    mime="application/pdf",
-                    use_container_width=True
-                )
+            def add_line(desc, qty, rate):
+                price = round(qty * rate)
+                lines_for_preview.append({
+                    "desc": desc,
+                    "qty": qty if qty else "",
+                    "rate": f"{int(rate)}" if rate else "",
+                    "price": f"{price}" if price else ""
+                })
+                return price
+
+            food_subtotal = 0
+            food_subtotal += add_line("Meal Plan", st.session_state.get("q_meals", 26), price_meal)
+            food_subtotal += add_line("Seafood add-on", st.session_state.get("q_sea", 0), settings["price_seafood_addon"])
+            food_subtotal += add_line("Juice", st.session_state.get("q_juice", 0), settings["price_juice"])
+            food_subtotal += add_line("Snack", st.session_state.get("q_snack", 0), settings["price_snack"])
+            food_subtotal += add_line("Breakfast", st.session_state.get("q_brk", 0), settings["price_breakfast"])
+
+            gst_amount = round(food_subtotal * (settings["gst_percent"]/100.0)) if settings["gst_percent"] else 0
+            delivery_amount = round(st.session_state.get("q_delivdays", 0) * st.session_state.get("rate_deliv", 0.0))
+            grand_total = round(food_subtotal + gst_amount + delivery_amount)
+
+            fields = {
+                "invoice_no": st.session_state.get("admin_invoice_no","").strip(),
+                "bill_date": st.session_state.get("adm_bill_date", date.today()).strftime("%d-%b-%Y") if isinstance(st.session_state.get("adm_bill_date"), date) else date.today().strftime("%d-%b-%Y"),
+                "client": st.session_state.get("adm_client_lbl", st.session_state["client"]) or st.session_state["client"],
+                "duration": st.session_state.get("adm_dur", ""),
+                "gst_value": money(gst_amount),
+                "total_value": money(grand_total),
+            }
+
+            if (do_preview or do_pdf):
+                template_img = try_load_template()
+                if not template_img:
+                    st.error("Template PNG not found. Place `invoice_template_a4.png` (or `invoice_template.png`) in the app folder.")
+                else:
+                    visible_rows = [r for r in lines_for_preview if (r["qty"] or r["price"])]
+                    if not visible_rows:
+                        visible_rows = [{"desc":"Meal Plan","qty":"","rate":"","price":""}]
+                    inv_img = render_invoice_image(template_img, fields, visible_rows)
+                    st.image(inv_img, caption="Invoice Preview", use_column_width=True)
+                    if do_pdf:
+                        pdf_bytes = image_to_pdf_bytes(inv_img)
+                        st.download_button(
+                            "Download Invoice PDF",
+                            data=pdf_bytes,
+                            file_name=f"Invoice_{(st.session_state['client'] or 'Client').replace(' ','_')}_{date.today().strftime('%Y%m%d')}.pdf",
+                            mime="application/pdf",
+                            use_container_width=True
+                        )
+
+# RIGHT CONSOLE (Admin) — mirrors left console look
+with right_col:
+    st.markdown("### 🛠️ Admin")
+    # Plan + basic header info
+    st.session_state["adm_client_lbl"] = st.text_input("Client label (print as)", value=(st.session_state["adm_client_lbl"] if st.session_state.get("adm_client_lbl") else (st.session_state["client"] or "")), key="adm_client_lbl")
+    st.session_state["adm_bill_date"]  = st.date_input("Billing date", value=(st.session_state.get("adm_bill_date") or date.today()), key="adm_bill_date")
+    st.session_state["admin_plan"]     = st.selectbox("Plan", ["Nutri", "High Protein"], index=(0 if st.session_state.get("admin_plan","Nutri")=="Nutri" else 1), key="admin_plan")
+
+    # Prefill bill start/end from fetched next_start/end
+    def _prefill_date_text(d: Optional[date]) -> str:
+        return dtstr(d) if isinstance(d, date) else ""
+    if st.session_state["fetched"]:
+        default_start = _prefill_date_text(st.session_state["next_start"])
+        default_end   = _prefill_date_text(st.session_state["next_end"])
+    else:
+        default_start = st.session_state.get("adm_start","")
+        default_end   = st.session_state.get("adm_end","")
+
+    st.session_state["adm_start"] = st.text_input("Bill start (dd-MMM-YYYY)", value=(st.session_state.get("adm_start") or default_start), key="adm_start")
+    st.session_state["adm_end"]   = st.text_input("Bill end (dd-MMM-YYYY)",   value=(st.session_state.get("adm_end")   or default_end),   key="adm_end")
+
+    # Invoice No + duration text
+    st.session_state["admin_invoice_no"] = st.text_input("Invoice No.", value=st.session_state.get("admin_invoice_no",""), key="admin_invoice_no")
+    # If both start/end are present, auto duration text (editable)
+    auto_dur = ""
+    if st.session_state.get("adm_start") and st.session_state.get("adm_end"):
+        auto_dur = f"from {st.session_state['adm_start']} to {st.session_state['adm_end']}"
+    st.session_state["adm_dur"] = st.text_input("Bill duration text", value=(st.session_state.get("adm_dur") or auto_dur), key="adm_dur")
+
+    st.markdown("**Quantities (rates & GST in LEFT console)**")
+    # quantities with sensible defaults
+    st.session_state["q_meals"]     = st.number_input("Meals qty", value=st.session_state.get("q_meals", 26), step=1, min_value=0, key="q_meals")
+    st.session_state["q_delivdays"] = st.number_input("Delivery days", value=st.session_state.get("q_delivdays", 26), step=1, min_value=0, key="q_delivdays")
+
+    c3, c4, c5 = st.columns(3)
+    st.session_state["q_sea"]   = c3.number_input("Seafood qty", value=st.session_state.get("q_sea", 0), step=1, min_value=0, key="q_sea")
+    st.session_state["q_juice"] = c4.number_input("Juice qty", value=st.session_state.get("q_juice", 0), step=1, min_value=0, key="q_juice")
+    st.session_state["q_snack"] = c5.number_input("Snack qty", value=st.session_state.get("q_snack", 0), step=1, min_value=0, key="q_snack")
+
+    c6, c7 = st.columns(2)
+    st.session_state["q_brk"]     = c6.number_input("Breakfast qty", value=st.session_state.get("q_brk", 0), step=1, min_value=0, key="q_brk")
+    st.session_state["rate_deliv"] = c7.number_input("Delivery per day (₹)", value=float(st.session_state.get("rate_deliv", st.session_state.get("delivery_per_day", 0.0))), step=5.0, key="rate_deliv")
