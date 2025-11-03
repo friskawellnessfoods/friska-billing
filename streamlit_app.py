@@ -2,12 +2,12 @@
 # -*- coding: utf-8 -*-
 
 # =========================================================
-# Friska Billing – Dual consoles + Center stage
-# - No state/key conflicts (no writing to a widget key in session_state)
-# - New clients supported via "Manual date override" expander
-# - Admin (right console) prefilled with next-cycle dates after fetch
-# - Save Next Cycle updates BillingCycle (update or append)
-# - Full-width invoice preview in center
+# Friska Wellness — Billing System (Streamlit)
+# - Dual consoles (Left=Prices, Right=Admin)
+# - Center stage (Fetch, Usage Summary, Next Cycle, Preview/PDF)
+# - Manual date override for new clients / power control
+# - BillingCycle update/append
+# - Invoice renderer aligned to labeled PNG template
 # =========================================================
 
 import streamlit as st
@@ -22,7 +22,7 @@ from PIL import Image, ImageDraw, ImageFont
 SHEET_URL = "https://docs.google.com/spreadsheets/d/1CsT6_oYsFjgQQ73pt1Bl1cuXuzKY8JnOTB3E4bDkTiA/edit?usp=sharing"
 BILLING_TAB = "BillingCycle"   # Row1 headers: Client | Start | End
 
-# Clientlist layout
+# Clientlist layout (your sheet structure)
 COL_B_CLIENT = 1
 COL_C_TYPE   = 2
 COL_G_DELIVERY = 6
@@ -45,7 +45,7 @@ DEFAULT_SETTINGS = {
     "gst_percent": 5.0,
 }
 
-# ---------- Template + layout ----------
+# ---------- Template + layout (aligned to your labeled PNG) ----------
 TEMPLATE_CANDIDATES = [
     "invoice_template_a4.png",
     "invoice_template.png",
@@ -57,30 +57,36 @@ LAYOUT = {
     "fonts": {
         "regular": ["DejaVuSans.ttf", "/usr/share/fonts/truetype/dejavu/DejaVuSans.ttf", "arial.ttf"],
         "bold":    ["DejaVuSans-Bold.ttf", "/usr/share/fonts/truetype/dejavu/DejaVuSans-Bold.ttf", "arialbd.ttf"],
-        "scale": 0.010,
+        "scale": 0.0078,  # base font size ~0.78% of image height
     },
     "header": {
-        "invoice_no":   {"xy": (78, 7),  "size": 2.0, "bold": True,  "align": "left"},
-        "bill_date":    {"xy": (78, 11), "size": 1.8, "bold": False, "align": "left"},
-        "client":       {"xy": (22, 20), "size": 2.2, "bold": True,  "align": "left"},
-        "duration":     {"xy": (22, 24), "size": 1.8, "bold": False, "align": "left"},
+        # Bill Duration row (top row under logo)
+        "dur_start":  {"xy": (16.0, 16.3), "size": 1.55, "bold": False, "align": "left"},
+        "dur_end":    {"xy": (41.5, 16.3), "size": 1.55, "bold": False, "align": "left"},
+        "invoice_no": {"xy": (86.0, 16.0), "size": 1.55, "bold": True,  "align": "right"},
+        # Billing Date row (second header row)
+        "bill_date":  {"xy": (16.0, 22.9), "size": 1.45, "bold": False, "align": "left"},
+        "days":       {"xy": (41.5, 22.9), "size": 1.45, "bold": False, "align": "left"},
+        "client":     {"xy": (86.0, 22.8), "size": 1.85, "bold": True,  "align": "right"},
     },
     "table": {
-        "top_y": 30,
-        "row_gap": 3.5,
+        "top_y": 30.8,     # first line item row
+        "row_gap": 5.4,    # vertical gap per row
         "cols": {
-            "desc":  {"x": 8,  "w": 56, "align": "left"},
-            "qty":   {"x": 66, "w": 8,  "align": "right"},
-            "rate":  {"x": 76, "w": 8,  "align": "right"},
-            "price": {"x": 86, "w": 8,  "align": "right"},
+            "desc":  {"x": 8.0,  "w": 55.0, "align": "left"},
+            "qty":   {"x": 63.8, "w": 8.4,  "align": "right"},
+            "rate":  {"x": 74.8, "w": 8.4,  "align": "right"},
+            "price": {"x": 86.3, "w": 8.4,  "align": "right"},
         },
-        "font_size": 1.8,
+        "font_size_desc": 1.70,
+        "font_size_num":  1.70,
         "bold_desc": False
     },
     "totals": {
-        "gst":   {"xy": (86, 78), "size": 2.0, "bold": True, "align": "right"},
-        "total": {"xy": (86, 84), "size": 2.4, "bold": True, "align": "right"},
-        "label_x": 66,
+        "gst_label":   {"xy": (74.8, 75.5), "size": 1.9, "bold": True, "align": "left"},
+        "gst_value":   {"xy": (86.3, 75.5), "size": 1.9, "bold": True, "align": "right"},
+        "total_label": {"xy": (74.8, 83.8), "size": 2.2, "bold": True, "align": "left"},
+        "total_value": {"xy": (86.3, 83.8), "size": 2.2, "bold": True, "align": "right"},
     }
 }
 
@@ -240,14 +246,12 @@ def count_usage(session: AuthorizedSession, spid: str, start: date, end: date, c
         data = fetch_values(session, spid, f"{sheet_title}!A1:ZZ2000")
         if not data: continue
 
-        # rows for this client
         rows_by_client = {}
         for r, row in enumerate(data):
             nm = norm_name(row[COL_B_CLIENT]) if len(row) > COL_B_CLIENT else ""
             if nm: rows_by_client.setdefault(nm, []).append(r)
         client_rows = rows_by_client.get(client_key, [])
 
-        # header dates map
         row1 = data[0] if data else []
         date_to_block = {}; header_dates = []
         c = START_DATA_COL_IDX
@@ -339,6 +343,11 @@ def update_cycle_row(session: AuthorizedSession, spid: str, sheet_row_number: in
     return update_values(session, spid, range_a1, rows)
 
 # ---------- Drawing helpers ----------
+def percent_to_px(w, h, perc_xy):
+    x = int(round((perc_xy[0] / 100.0) * w))
+    y = int(round((perc_xy[1] / 100.0) * h))
+    return x, y
+
 def _pick_font(paths: List[str], px: int) -> ImageFont.FreeTypeFont:
     for p in paths:
         try:
@@ -347,7 +356,8 @@ def _pick_font(paths: List[str], px: int) -> ImageFont.FreeTypeFont:
             continue
     return ImageFont.load_default()
 
-def _draw_text(draw: ImageDraw.ImageDraw, text: str, xy_px: Tuple[int,int], font: ImageFont.FreeTypeFont, align="left"):
+def _draw_text(draw: ImageDraw.ImageDraw, text: str, xy_px: Tuple[int,int],
+               font: ImageFont.FreeTypeFont, align="left"):
     x, y = xy_px
     if align == "right":
         w = draw.textlength(text, font=font)
@@ -362,49 +372,56 @@ def try_load_template() -> Optional[Image.Image]:
             continue
     return None
 
-def percent_to_px(w, h, perc_xy):
-    x = int(round((perc_xy[0] / 100.0) * w)); y = int(round((perc_xy[1] / 100.0) * h))
-    return x, y
-
 def render_invoice_image(template: Image.Image, fields: Dict[str, str], rows: List[Dict[str, str]]) -> Image.Image:
+    """
+    fields keys expected:
+      'dur_start','dur_end','invoice_no','bill_date','days','client',
+      'gst_label','gst_value','total_label','total_value'
+    rows: list of dicts with 'desc','qty','rate','price'
+    """
     img = template.copy()
     draw = ImageDraw.Draw(img)
     W, H = img.size
+
+    # Header
     base_px = max(12, int(LAYOUT["fonts"]["scale"] * H))
     for key, spec in LAYOUT["header"].items():
         val = fields.get(key, "")
-        if not val: continue
+        if val is None: val = ""
         x, y = percent_to_px(W, H, spec["xy"])
         size_px = int(spec.get("size", 1.0) * base_px)
         font = _pick_font(LAYOUT["fonts"]["bold"] if spec.get("bold") else LAYOUT["fonts"]["regular"], size_px)
         _draw_text(draw, val, (x, y), font, align=spec.get("align","left"))
+
+    # Table rows
     t = LAYOUT["table"]
-    start_y_pct = t["top_y"]; row_gap_pct = t["row_gap"]
-    fs_px = int(t.get("font_size", 1.0) * base_px)
-    font_desc = _pick_font(LAYOUT["fonts"]["bold"] if t.get("bold_desc") else LAYOUT["fonts"]["regular"], fs_px)
-    font_num = _pick_font(LAYOUT["fonts"]["regular"], fs_px)
-    def col_x(col_key): return percent_to_px(W, H, (t["cols"][col_key]["x"], 0))[0]
-    def col_right(col_key):
-        x = t["cols"][col_key]["x"] + t["cols"][col_key]["w"]
-        return percent_to_px(W, H, (x, 0))[0]
+    fs_desc = int(t.get("font_size_desc", 1.0) * base_px)
+    fs_num  = int(t.get("font_size_num",  1.0) * base_px)
+    font_desc = _pick_font(LAYOUT["fonts"]["bold"] if t.get("bold_desc") else LAYOUT["fonts"]["regular"], fs_desc)
+    font_num  = _pick_font(LAYOUT["fonts"]["regular"], fs_num)
+
+    def col_left(col_key):  return percent_to_px(W, H, (t["cols"][col_key]["x"], 0))[0]
+    def col_right(col_key): return percent_to_px(W, H, (t["cols"][col_key]["x"] + t["cols"][col_key]["w"], 0))[0]
+
     for i, r in enumerate(rows):
-        y_pct = start_y_pct + i*row_gap_pct
+        y_pct = t["top_y"] + i * t["row_gap"]
         y = percent_to_px(W, H, (0, y_pct))[1]
-        _draw_text(draw, str(r.get("desc","")), (col_x("desc"), y), font_desc, align="left")
-        _draw_text(draw, str(r.get("qty","")),  (col_right("qty"), y),  font_num, align="right")
-        _draw_text(draw, str(r.get("rate","")), (col_right("rate"), y), font_num, align="right")
-        _draw_text(draw, str(r.get("price","")),(col_right("price"), y),font_num, align="right")
+        _draw_text(draw, str(r.get("desc","")), (col_left("desc"), y), font_desc, align="left")
+        _draw_text(draw, str(r.get("qty","")),  (col_right("qty"),  y), font_num,  align="right")
+        _draw_text(draw, str(r.get("rate","")), (col_right("rate"), y), font_num,  align="right")
+        _draw_text(draw, str(r.get("price","")),(col_right("price"),y), font_num,  align="right")
+
+    # GST & TOTAL
     for key, spec in LAYOUT["totals"].items():
-        if key not in ("gst","total"): continue
-        label = "GST" if key=="gst" else "TOTAL"
-        value = fields.get("gst_value" if key=="gst" else "total_value", "")
-        label_x_pct = LAYOUT["totals"]["label_x"]
-        lbl_x, lbl_y = percent_to_px(W, H, (label_x_pct, spec["xy"][1]))
-        val_x, val_y = percent_to_px(W, H, spec["xy"])
-        fs_px2 = int(spec.get("size", 1.0) * base_px)
-        font2 = _pick_font(LAYOUT["fonts"]["bold"] if spec.get("bold") else LAYOUT["fonts"]["regular"], fs_px2)
-        _draw_text(draw, label, (lbl_x, lbl_y), font2, align="left")
-        _draw_text(draw, value, (val_x, val_y), font2, align="right")
+        label = "GST" if key == "gst_label" else ("TOTAL" if key == "total_label" else None)
+        value = fields.get(key, "")
+        x, y = percent_to_px(W, H, spec["xy"])
+        size_px = int(spec.get("size", 1.0) * base_px)
+        font = _pick_font(LAYOUT["fonts"]["bold"] if spec.get("bold") else LAYOUT["fonts"]["regular"], size_px)
+        if label:
+            _draw_text(draw, label, (x, y), font, align=spec.get("align","left"))
+        else:
+            _draw_text(draw, str(value or ""), (x, y), font, align=spec.get("align","right"))
     return img
 
 def image_to_pdf_bytes(img: Image.Image) -> bytes:
@@ -419,7 +436,7 @@ st.markdown("<h2 style='margin-bottom:0'>Friska Wellness — Billing System</h2>
 session = get_service_account_session()
 spid = get_spreadsheet_id(SHEET_URL)
 
-# ---------- Init session state (no widget keys here) ----------
+# ---------- Init session state (no widget-key conflicts) ----------
 boot_defaults = {
     "fetched": False,
     "client": "",
@@ -462,16 +479,14 @@ with left_col:
         save_settings(settings)
         st.success("Saved.")
 
-# ----- helper: find/compute -----
+# helper to compute range -> totals + next cycle
 def compute_from_range(client_name: str, prev_start: date, prev_end: date):
     (totals, active_days, paused_days, total_days,
      paused_dates, _delivery_amount, last_per_day_delivery) = count_usage(session, spid, prev_start, prev_end, client_name)
-    # next cycle logic
     needed_adjust = paused_days
     needed_bill   = 26
     future_needed = needed_adjust + needed_bill
     future_dates  = next_service_calendar_dates(prev_end, future_needed)
-    adj_dates     = future_dates[:needed_adjust]
     bill_dates    = future_dates[needed_adjust:needed_adjust+needed_bill]
     next_start = bill_dates[0] if bill_dates else None
     next_end   = bill_dates[-1] if bill_dates else None
@@ -503,7 +518,6 @@ with mid_col:
         cmo1, cmo2 = st.columns(2)
         mo_start = cmo1.text_input("Start (dd-MMM-YYYY)", value="", key="mo_start")
         mo_end   = cmo2.text_input("End (dd-MMM-YYYY)",   value="", key="mo_end")
-        # Convert manual inputs
         def _parse_d(s):
             try: return datetime.strptime(s.strip(), "%d-%b-%Y").date() if s.strip() else None
             except: return None
@@ -531,8 +545,7 @@ with mid_col:
                     compute_from_range(nm, prev_start, prev_end)
                     st.success("Computed from BillingCycle.")
                 else:
-                    # No record -> ask for manual dates
-                    st.warning("Client not found in BillingCycle. Please open the 'Manual date override' and enter Start/End.")
+                    st.warning("Client not found in BillingCycle. Open the 'Manual date override' and enter Start/End.")
                     st.session_state["fetched"] = False
 
     # Results
@@ -556,7 +569,6 @@ with mid_col:
         nl = []
         nl.append(f"- **Previous bill range:** {dtstr(st.session_state['prev_start'])} → {dtstr(st.session_state['prev_end'])}")
         nl.append(f"- **Paused days to adjust:** {st.session_state['paused_days']}")
-        # List adjustment dates
         adj_needed = st.session_state['paused_days']
         if adj_needed:
             future_dates = next_service_calendar_dates(st.session_state['prev_end'], adj_needed)
@@ -596,6 +608,8 @@ with mid_col:
         lines_for_preview = []
 
         def add_line(desc, qty, rate):
+            qty = int(qty) if qty else 0
+            rate = float(rate) if rate else 0.0
             price = round(qty * rate)
             lines_for_preview.append({
                 "desc": desc,
@@ -608,20 +622,32 @@ with mid_col:
         food_subtotal = 0
         food_subtotal += add_line("Meal Plan", st.session_state.get("q_meals", 26), price_meal)
         food_subtotal += add_line("Seafood add-on", st.session_state.get("q_sea", 0), settings["price_seafood_addon"])
+        food_subtotal += add_line("Breakfast", st.session_state.get("q_brk", 0), settings["price_breakfast"])
         food_subtotal += add_line("Juice", st.session_state.get("q_juice", 0), settings["price_juice"])
         food_subtotal += add_line("Snack", st.session_state.get("q_snack", 0), settings["price_snack"])
-        food_subtotal += add_line("Breakfast", st.session_state.get("q_brk", 0), settings["price_breakfast"])
 
         gst_amount = round(food_subtotal * (settings["gst_percent"]/100.0)) if settings["gst_percent"] else 0
         delivery_amount = round(st.session_state.get("q_delivdays", 0) * st.session_state.get("rate_deliv", 0.0))
         grand_total = round(food_subtotal + gst_amount + delivery_amount)
 
+        # Build header strings for the template’s exact boxes
+        dur_start_text = (st.session_state.get("adm_start") or "").strip()
+        dur_end_text   = (st.session_state.get("adm_end") or "").strip()
+        client_label   = (st.session_state.get("adm_client_lbl") or st.session_state.get("client","")).strip()
+        bill_date_text = st.session_state.get("adm_bill_date", date.today())
+        if isinstance(bill_date_text, date):
+            bill_date_text = bill_date_text.strftime("%d-%b-%Y")
+
         fields = {
+            "dur_start":  dur_start_text,
+            "dur_end":    dur_end_text,
             "invoice_no": st.session_state.get("admin_invoice_no","").strip(),
-            "bill_date": st.session_state.get("adm_bill_date", date.today()).strftime("%d-%b-%Y") if isinstance(st.session_state.get("adm_bill_date"), date) else date.today().strftime("%d-%b-%Y"),
-            "client": st.session_state.get("adm_client_lbl", st.session_state["client"]) or st.session_state["client"],
-            "duration": st.session_state.get("adm_dur", ""),
-            "gst_value": f"₹{gst_amount}",
+            "bill_date":  bill_date_text,
+            "days":       "Days- 26",
+            "client":     client_label,
+            "gst_label":   "GST",
+            "gst_value":   f"₹{gst_amount}",
+            "total_label": "TOTAL",
             "total_value": f"₹{grand_total}",
         }
 
@@ -645,10 +671,9 @@ with mid_col:
                         use_container_width=True
                     )
 
-# RIGHT CONSOLE (Admin) — NO direct writes to the same keys outside widgets
+# RIGHT CONSOLE (Admin)
 with right_col:
     st.markdown("### 🛠️ Admin")
-    # Plan + header info
     st.text_input("Client label (print as)", value=(st.session_state.get("adm_client_lbl") or st.session_state.get("client","")), key="adm_client_lbl")
     st.date_input("Billing date", value=(st.session_state.get("adm_bill_date") or date.today()), key="adm_bill_date")
     st.selectbox("Plan", ["Nutri", "High Protein"], index=(0 if st.session_state.get("admin_plan","Nutri")=="Nutri" else 1), key="admin_plan")
@@ -666,11 +691,11 @@ with right_col:
     st.text_input("Bill end (dd-MMM-YYYY)",   value=st.session_state.get("adm_end",""),   key="adm_end")
 
     st.text_input("Invoice No.", value=st.session_state.get("admin_invoice_no",""), key="admin_invoice_no")
-    # Duration auto if both present; user can edit
+
+    # Duration (auto default if both present; user can edit)
     auto_dur = ""
     if st.session_state.get("adm_start") and st.session_state.get("adm_end"):
         auto_dur = f"from {st.session_state['adm_start']} to {st.session_state['adm_end']}"
-        # Only set default if empty to avoid widget/key conflict
         if not st.session_state.get("adm_dur"):
             st.session_state["adm_dur"] = auto_dur
     st.text_input("Bill duration text", value=st.session_state.get("adm_dur", auto_dur), key="adm_dur")
