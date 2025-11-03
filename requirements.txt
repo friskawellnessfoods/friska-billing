@@ -1,0 +1,6 @@
+streamlit
+google-auth
+google-auth-oauthlib
+requests
+pillow
+reportlab
