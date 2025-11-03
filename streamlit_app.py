@@ -1,16 +1,6 @@
 #!/usr/bin/env python3
 # -*- coding: utf-8 -*-
 
-# =========================================================
-# Friska Wellness — Billing System (Streamlit)
-# - Prices console (left), Admin console (right)
-# - Center: Fetch usage, Next Cycle, Save, Invoice Preview/PDF
-# - Manual override for new clients
-# - BillingCycle update/append
-# - Template renderer aligned to your labelled PNG
-#   (with tighter header/table/GST/TOTAL placement + Delivery line)
-# =========================================================
-
 import streamlit as st
 import re, json, io, os, calendar
 from datetime import datetime, timedelta, date
@@ -19,11 +9,11 @@ from google.oauth2.service_account import Credentials
 from google.auth.transport.requests import AuthorizedSession
 from PIL import Image, ImageDraw, ImageFont
 
-# ---------- CONFIG ----------
+# ===================== CONFIG =====================
 SHEET_URL = "https://docs.google.com/spreadsheets/d/1CsT6_oYsFjgQQ73pt1Bl1cuXuzKY8JnOTB3E4bDkTiA/edit?usp=sharing"
-BILLING_TAB = "BillingCycle"   # Row1: Client | Start | End
+BILLING_TAB = "BillingCycle"   # headers: Client | Start | End
 
-# Clientlist layout
+# clientlist sheet structure
 COL_B_CLIENT = 1
 COL_C_TYPE   = 2
 COL_G_DELIVERY = 6
@@ -31,7 +21,7 @@ START_DATA_COL_IDX = 7   # H
 COLUMNS_PER_BLOCK  = 6   # Meal1, Meal2, Snack, J1, J2, Breakfast
 
 SCOPES = [
-    "https://www.googleapis.com/auth/spreadsheets",     # read+write
+    "https://www.googleapis.com/auth/spreadsheets",
     "https://www.googleapis.com/auth/drive.readonly",
 ]
 
@@ -46,7 +36,6 @@ DEFAULT_SETTINGS = {
     "gst_percent": 5.0,
 }
 
-# ---------- Template + layout ----------
 TEMPLATE_CANDIDATES = [
     "invoice_template_a4.png",
     "invoice_template.png",
@@ -54,54 +43,51 @@ TEMPLATE_CANDIDATES = [
     "assets/invoice_template.png",
 ]
 
-# Fine-tuned for your screenshots
+# ======= Fine-tuned layout for your PNG (based on your last screenshot) =======
 LAYOUT = {
     "fonts": {
         "regular": ["DejaVuSans.ttf", "/usr/share/fonts/truetype/dejavu/DejaVuSans.ttf", "arial.ttf"],
         "bold":    ["DejaVuSans-Bold.ttf", "/usr/share/fonts/truetype/dejavu/DejaVuSans-Bold.ttf", "arialbd.ttf"],
         "scale": 0.0078,
     },
-    # Header cells (slightly right & down to align with name)
+    # Header cells — pushed further down/right
     "header": {
-        # Top row under logo
-        "dur_start":  {"xy": (16.6, 16.6), "size": 1.55, "bold": False, "align": "left"},
-        "dur_end":    {"xy": (42.0, 16.6), "size": 1.55, "bold": False, "align": "left"},
-        "invoice_no": {"xy": (86.0, 16.0), "size": 1.55, "bold": True,  "align": "right"},
-        # Second header row
-        "bill_date":  {"xy": (16.6, 23.2), "size": 1.45, "bold": False, "align": "left"},
-        "days":       {"xy": (42.0, 23.2), "size": 1.45, "bold": False, "align": "left"},
-        "client":     {"xy": (86.4, 23.2), "size": 1.85, "bold": True,  "align": "right"},
+        "dur_start":  {"xy": (17.2, 18.8), "size": 1.55, "bold": False, "align": "left"},
+        "dur_end":    {"xy": (43.0, 18.8), "size": 1.55, "bold": False, "align": "left"},
+        "invoice_no": {"xy": (86.5, 18.4), "size": 1.55, "bold": True,  "align": "right"},
+        "bill_date":  {"xy": (17.2, 25.2), "size": 1.45, "bold": False, "align": "left"},
+        "days":       {"xy": (43.0, 25.2), "size": 1.45, "bold": False, "align": "left"},
+        "client":     {"xy": (88.0, 25.2), "size": 1.85, "bold": True,  "align": "right"},
     },
-    # Table body
+    # Table — first row lower; columns more left
     "table": {
-        # One row lower + tiny left nudge for desc
-        "top_y": 31.6,     # lowered
+        "top_y": 34.0,     # lower so it sits under headings
         "row_gap": 5.4,
         "cols": {
-            "desc":  {"x": 7.6,  "w": 55.0, "align": "left"},   # a little left
-            "qty":   {"x": 61.0, "w": 8.4,  "align": "right"},  # ~2 cells left
-            "rate":  {"x": 73.8, "w": 8.4,  "align": "right"},  # ~1 cell left
-            "price": {"x": 86.0, "w": 8.4,  "align": "right"},
+            "desc":  {"x": 7.2,  "w": 55.0, "align": "left"},   # a touch left
+            "qty":   {"x": 58.8, "w": 8.4,  "align": "right"},  # ~2.8 cells left
+            "rate":  {"x": 70.8, "w": 8.4,  "align": "right"},  # ~1.8 cells left
+            "price": {"x": 83.8, "w": 8.4,  "align": "right"},  # slightly left
         },
         "font_size_desc": 1.70,
         "font_size_num":  1.70,
         "bold_desc": False
     },
-    # Move GST/TOTAL up ~two rows
+    # Totals — moved well above footer band
     "totals": {
-        "gst_label":   {"xy": (74.8, 72.0), "size": 1.9, "bold": True, "align": "left"},
-        "gst_value":   {"xy": (86.3, 72.0), "size": 1.9, "bold": True, "align": "right"},
-        "total_label": {"xy": (74.8, 80.2), "size": 2.2, "bold": True, "align": "left"},
-        "total_value": {"xy": (86.3, 80.2), "size": 2.2, "bold": True, "align": "right"},
+        "gst_label":   {"xy": (74.8, 66.8), "size": 1.9, "bold": True, "align": "left"},
+        "gst_value":   {"xy": (86.3, 66.8), "size": 1.9, "bold": True, "align": "right"},
+        "total_label": {"xy": (74.8, 73.8), "size": 2.2, "bold": True, "align": "left"},
+        "total_value": {"xy": (86.3, 73.8), "size": 2.2, "bold": True, "align": "right"},
     }
 }
 
-# ---------- Auth ----------
+# ===================== Auth & Sheets helpers =====================
 def get_service_account_session() -> AuthorizedSession:
     try:
         sec = st.secrets["gcp_credentials"]
     except Exception:
-        st.error("Secrets missing: Add Service Account JSON under [gcp_credentials].")
+        st.error("Secrets missing: put your Service Account JSON under [gcp_credentials].")
         st.stop()
     try:
         sa_info = json.loads(sec["value"]) if isinstance(sec, dict) and "value" in sec else dict(sec)
@@ -118,7 +104,6 @@ def get_spreadsheet_id(url: str) -> str:
         st.stop()
     return m.group(1)
 
-# ---------- Settings I/O ----------
 def load_settings():
     try:
         with open(SETTINGS_FILE, "r", encoding="utf-8") as f:
@@ -130,7 +115,6 @@ def save_settings(s: dict):
     with open(SETTINGS_FILE, "w", encoding="utf-8") as f:
         json.dump(s, f, indent=2)
 
-# ---------- Helpers ----------
 WEEKDAY_PREFIX = re.compile(
     r"^\s*(Mon|Tue|Wed|Thu|Fri|Sat|Sun|Monday|Tuesday|Wednesday|Thursday|Friday|Saturday|Sunday)\s*,\s*",
     re.I
@@ -165,7 +149,7 @@ def fetch_values(session: AuthorizedSession, spid: str, a1_range: str) -> List[L
     url = f"https://sheets.googleapis.com/v4/spreadsheets/{spid}/values/{enc}"
     r = session.get(url, params={"valueRenderOption": "UNFORMATTED_VALUE"}, timeout=30)
     if r.status_code == 403:
-        st.error("Google Sheets permission denied. Share the file with the service account (Editor).")
+        st.error("Permission denied. Share the Sheet with the service account (Editor).")
         st.stop()
     r.raise_for_status()
     return r.json().get("values", []) or []
@@ -186,7 +170,6 @@ def update_values(session: AuthorizedSession, spid: str, range_a1: str, rows: Li
     r.raise_for_status()
     return r.json()
 
-# ---------- ClientList helpers ----------
 def get_clientlist_sheet_title(session: AuthorizedSession, spid: str, month_full: str) -> Tuple[Optional[str], List[str]]:
     desired1 = f"clientlist {month_full}".lower()
     desired2 = f"clientlist {month_full[:3]}".lower()
@@ -214,7 +197,6 @@ def parse_float(x) -> float:
         return float(num) if num else 0.0
     except: return 0.0
 
-# ---------- Delivery pricing ----------
 def compute_delivery_per_day_for_rows(rows: List[int], data: List[List[str]]):
     if not rows:
         return 0.0, "none", []
@@ -235,14 +217,11 @@ def compute_delivery_per_day_for_rows(rows: List[int], data: List[List[str]]):
         return (sum(prices) if prices else 0.0), "sum_shifts", []
     return (max(prices) if prices else 0.0), "single_mismatch", []
 
-# ---------- Usage counting ----------
 def count_usage(session: AuthorizedSession, spid: str, start: date, end: date, client_name: str):
     client_key = norm_name(client_name)
     totals = dict(meal1=0, meal2=0, snack=0, j1=0, j2=0, brk=0, seafood=0)
-    total_days = 0
-    active_days = 0
+    total_days = 0; active_days = 0
     paused_dates: List[date] = []
-    delivery_amount_total = 0.0
     last_per_day_delivery = 0.0
 
     for (yy, mm) in month_span_inclusive(start, end):
@@ -273,7 +252,7 @@ def count_usage(session: AuthorizedSession, spid: str, start: date, end: date, c
             c += COLUMNS_PER_BLOCK
 
         per_day_delivery, _, _ = compute_delivery_per_day_for_rows(client_rows, data)
-        last_per_day_delivery = per_day_delivery or last_per_day_delivery
+        if per_day_delivery: last_per_day_delivery = per_day_delivery
 
         service_days_this_month = 0
         for d in header_dates:
@@ -292,19 +271,18 @@ def count_usage(session: AuthorizedSession, spid: str, start: date, end: date, c
                 if str(cell(block+5)).strip(): bk += 1
             if (m1+m2+sn+j1+j2+bk) > 0: service_days_this_month += 1
             else: paused_dates.append(d)
+
             totals["meal1"]+=m1; totals["meal2"]+=m2; totals["snack"]+=sn
             totals["j1"]+=j1; totals["j2"]+=j2; totals["brk"]+=bk; totals["seafood"]+=sf
 
         total_days += len(header_dates)
         active_days += service_days_this_month
-        delivery_amount_total += per_day_delivery * service_days_this_month
 
     totals["meals_total"]  = totals["meal1"] + totals["meal2"]
     totals["juices_total"] = totals["j1"] + totals["j2"]
     paused_days = max(0, total_days - active_days)
-    return totals, active_days, paused_days, total_days, paused_dates, delivery_amount_total, last_per_day_delivery
+    return totals, active_days, paused_days, total_days, paused_dates, last_per_day_delivery
 
-# ---------- Next dates (Mon–Sat only) ----------
 def next_service_calendar_dates(after_day: date, needed: int) -> List[date]:
     out: List[date] = []
     cur = after_day + timedelta(days=1)
@@ -314,7 +292,6 @@ def next_service_calendar_dates(after_day: date, needed: int) -> List[date]:
         cur += timedelta(days=1)
     return out
 
-# ---------- BillingCycle I/O ----------
 def get_prev_cycle_for_client(session: AuthorizedSession, spid: str, client_name: str) -> Tuple[Optional[date], Optional[date], Optional[int]]:
     vals = fetch_values(session, spid, f"{BILLING_TAB}!A1:C10000")
     if not vals or len(vals) < 2:
@@ -325,19 +302,16 @@ def get_prev_cycle_for_client(session: AuthorizedSession, spid: str, client_name
     except ValueError:
         return None, None, None
     key = norm_name(client_name)
-    last_row = None
-    last_row_index = None
+    last_row = None; last_row_index = None
     for idx, r in enumerate(vals[1:], start=1):
         if len(r) <= max(ci, si, ei): continue
         if norm_name(r[ci]) == key:
-            last_row = r
-            last_row_index = idx
+            last_row = r; last_row_index = idx
     if last_row is None:
         return None, None, None
     sd = to_dt(last_row[si]); ed = to_dt(last_row[ei])
-    if not sd or not ed:
-        return None, None, None
-    return sd.date(), ed.date(), last_row_index + 1  # sheet row number
+    if not sd or not ed: return None, None, None
+    return sd.date(), ed.date(), last_row_index + 1
 
 def append_cycle_row(session: AuthorizedSession, spid: str, client, start, end):
     row = [client, dtstr(start), dtstr(end)]
@@ -348,7 +322,7 @@ def update_cycle_row(session: AuthorizedSession, spid: str, sheet_row_number: in
     rows = [[client, dtstr(start), dtstr(end)]]
     return update_values(session, spid, range_a1, rows)
 
-# ---------- Drawing helpers ----------
+# ===================== Drawing helpers =====================
 def percent_to_px(w, h, perc_xy):
     x = int(round((perc_xy[0] / 100.0) * w))
     y = int(round((perc_xy[1] / 100.0) * h))
@@ -379,27 +353,18 @@ def try_load_template() -> Optional[Image.Image]:
     return None
 
 def render_invoice_image(template: Image.Image, fields: Dict[str, str], rows: List[Dict[str, str]]) -> Image.Image:
-    """
-    fields keys:
-      'dur_start','dur_end','invoice_no','bill_date','days','client',
-      'gst_label','gst_value','total_label','total_value'
-    rows: list of dicts with 'desc','qty','rate','price'
-    """
     img = template.copy()
     draw = ImageDraw.Draw(img)
     W, H = img.size
 
-    # Header
     base_px = max(12, int(LAYOUT["fonts"]["scale"] * H))
     for key, spec in LAYOUT["header"].items():
-        val = fields.get(key, "")
-        if val is None: val = ""
+        val = fields.get(key, "") or ""
         x, y = percent_to_px(W, H, spec["xy"])
         size_px = int(spec.get("size", 1.0) * base_px)
         font = _pick_font(LAYOUT["fonts"]["bold"] if spec.get("bold") else LAYOUT["fonts"]["regular"], size_px)
         _draw_text(draw, val, (x, y), font, align=spec.get("align","left"))
 
-    # Table rows
     t = LAYOUT["table"]
     fs_desc = int(t.get("font_size_desc", 1.0) * base_px)
     fs_num  = int(t.get("font_size_num",  1.0) * base_px)
@@ -412,12 +377,11 @@ def render_invoice_image(template: Image.Image, fields: Dict[str, str], rows: Li
     for i, r in enumerate(rows):
         y_pct = t["top_y"] + i * t["row_gap"]
         y = percent_to_px(W, H, (0, y_pct))[1]
-        _draw_text(draw, str(r.get("desc","")), (col_left("desc"), y), font_desc, align="left")
+        _draw_text(draw, str(r.get("desc","")), (col_left("desc"),  y), font_desc, align="left")
         _draw_text(draw, str(r.get("qty","")),  (col_right("qty"),  y), font_num,  align="right")
         _draw_text(draw, str(r.get("rate","")), (col_right("rate"), y), font_num,  align="right")
         _draw_text(draw, str(r.get("price","")),(col_right("price"),y), font_num,  align="right")
 
-    # GST & TOTAL
     for key, spec in LAYOUT["totals"].items():
         label = "GST" if key == "gst_label" else ("TOTAL" if key == "total_label" else None)
         value = fields.get(key, "")
@@ -435,40 +399,31 @@ def image_to_pdf_bytes(img: Image.Image) -> bytes:
     img.convert("RGB").save(buf, format="PDF")
     return buf.getvalue()
 
-# ---------------- APP ----------------
+# ===================== APP =====================
 st.set_page_config(page_title="Friska Billing", page_icon="🥗", layout="wide")
 st.markdown("<h2 style='margin-bottom:0'>Friska Wellness — Billing System</h2>", unsafe_allow_html=True)
 
 session = get_service_account_session()
 spid = get_spreadsheet_id(SHEET_URL)
 
-# ---------- Init session state ----------
-boot_defaults = {
-    "fetched": False,
-    "client": "",
-    "prev_start": None,
-    "prev_end": None,
-    "next_start": None,
-    "next_end": None,
+# state
+defaults = {
+    "fetched": False, "client": "",
+    "prev_start": None, "prev_end": None,
+    "next_start": None, "next_end": None,
     "last_row_number": None,
     "delivery_per_day": 0.0,
-    "totals": {},
-    "active_days": 0,
-    "paused_days": 0,
-    "total_days": 0,
+    "totals": {}, "active_days": 0, "paused_days": 0, "total_days": 0,
     "paused_dates": [],
-    "admin_invoice_no": "",
-    "manual_override": False,
+    "admin_invoice_no": "", "manual_override": False
 }
-for k, v in boot_defaults.items():
-    if k not in st.session_state:
-        st.session_state[k] = v
+for k,v in defaults.items():
+    if k not in st.session_state: st.session_state[k]=v
 
-# ---------- 3-column layout ----------
-left_col, mid_col, right_col = st.columns([1, 2, 1])
+left, mid, right = st.columns([1,2,1])
 
-# LEFT CONSOLE (Prices)
-with left_col:
+# LEFT — prices
+with left:
     st.markdown("### ⚙️ Prices")
     settings = load_settings()
     c1, c2 = st.columns(2)
@@ -482,13 +437,10 @@ with left_col:
     settings["price_breakfast"] = c5.number_input("Breakfast (₹)", value=float(settings["price_breakfast"]), step=5.0, key="p_brk")
     settings["gst_percent"] = st.number_input("GST % (food only)", value=float(settings["gst_percent"]), step=1.0, min_value=0.0, key="gst")
     if st.button("💾 Save", use_container_width=True, key="save_prices"):
-        save_settings(settings)
-        st.success("Saved.")
+        save_settings(settings); st.success("Saved.")
 
-# helper to compute range -> totals + next cycle
 def compute_from_range(client_name: str, prev_start: date, prev_end: date):
-    (totals, active_days, paused_days, total_days,
-     paused_dates, _delivery_amount, last_per_day_delivery) = count_usage(session, spid, prev_start, prev_end, client_name)
+    totals, active_days, paused_days, total_days, paused_dates, learned_delivery = count_usage(session, spid, prev_start, prev_end, client_name)
     needed_adjust = paused_days
     needed_bill   = 26
     future_needed = needed_adjust + needed_bill
@@ -497,130 +449,124 @@ def compute_from_range(client_name: str, prev_start: date, prev_end: date):
     next_start = bill_dates[0] if bill_dates else None
     next_end   = bill_dates[-1] if bill_dates else None
     st.session_state.update({
-        "fetched": True,
-        "client": client_name,
-        "prev_start": prev_start,
-        "prev_end": prev_end,
-        "next_start": next_start,
-        "next_end": next_end,
-        "delivery_per_day": last_per_day_delivery,
-        "totals": totals,
-        "active_days": active_days,
-        "paused_days": paused_days,
-        "total_days": total_days,
+        "fetched": True, "client": client_name,
+        "prev_start": prev_start, "prev_end": prev_end,
+        "next_start": next_start, "next_end": next_end,
+        "delivery_per_day": learned_delivery or st.session_state.get("delivery_per_day", 0.0),
+        "totals": totals, "active_days": active_days,
+        "paused_days": paused_days, "total_days": total_days,
         "paused_dates": paused_dates,
+        # sensible Admin defaults
+        "q_meals": 26,
+        "q_delivdays": active_days,
+        "rate_deliv": learned_delivery or 0.0,
     })
 
-# CENTER STAGE
-with mid_col:
+# MID — workflow
+with mid:
     st.markdown("### Workflow")
-    cA, cB = st.columns([3, 1])
-    client_in = cA.text_input("Client (BillingCycle or manual override)", value=st.session_state["client"], key="client_input")
+    cA, cB = st.columns([3,1])
+    client_in = cA.text_input("Client", value=st.session_state["client"], key="client_input")
     save_mode = cB.selectbox("Save mode", ["Update latest row", "Append new row"], key="save_mode")
 
-    # Manual date override (collapsible)
-    with st.expander("Manual date override (use if client not in BillingCycle or to force a range)", expanded=False):
+    with st.expander("Manual date override (if client missing in BillingCycle / to force a range)", expanded=False):
         st.checkbox("Enable manual override", value=st.session_state.get("manual_override", False), key="manual_override")
-        cmo1, cmo2 = st.columns(2)
-        mo_start = cmo1.text_input("Start (dd-MMM-YYYY)", value="", key="mo_start")
-        mo_end   = cmo2.text_input("End (dd-MMM-YYYY)",   value="", key="mo_end")
+        cc1, cc2 = st.columns(2)
+        mo_start = cc1.text_input("Start (dd-MMM-YYYY)", value="", key="mo_start")
+        mo_end   = cc2.text_input("End (dd-MMM-YYYY)",   value="", key="mo_end")
         def _parse_d(s):
             try: return datetime.strptime(s.strip(), "%d-%b-%Y").date() if s.strip() else None
             except: return None
-        manual_start = _parse_d(mo_start)
-        manual_end   = _parse_d(mo_end)
+        manual_start = _parse_d(mo_start); manual_end = _parse_d(mo_end)
         if st.session_state["manual_override"] and (not manual_start or not manual_end):
             st.info("Enter both Start and End to use manual override.")
 
-    # Fetch button
     if st.button("📊 Fetch Usage & Plan", use_container_width=True, key="btn_fetch"):
         nm = (client_in or "").strip()
-        if not nm:
-            st.error("Enter client name.")
+        if not nm: st.error("Enter client name.")
         else:
-            prev_start, prev_end, last_row_num = get_prev_cycle_for_client(session, spid, nm)
-            st.session_state["last_row_number"] = last_row_num  # may be None
+            ps, pe, row_num = get_prev_cycle_for_client(session, spid, nm)
+            st.session_state["last_row_number"] = row_num
             if st.session_state["manual_override"]:
                 if manual_start and manual_end:
                     compute_from_range(nm, manual_start, manual_end)
-                    st.success("Computed from manual date override.")
+                    st.success("Computed from manual override.")
                 else:
-                    st.error("Manual override enabled. Please enter both Start and End.")
+                    st.error("Manual override enabled. Please enter Start & End.")
             else:
-                if prev_start and prev_end:
-                    compute_from_range(nm, prev_start, prev_end)
+                if ps and pe:
+                    compute_from_range(nm, ps, pe)
                     st.success("Computed from BillingCycle.")
                 else:
-                    st.warning("Client not found in BillingCycle. Open the 'Manual date override' and enter Start/End.")
-                    st.session_state["fetched"] = False
+                    st.warning("Client not found in BillingCycle. Use manual override.")
 
-    # Results
     if st.session_state["fetched"]:
         totals = st.session_state["totals"]
         st.markdown("#### Usage Summary")
-        lines = []
-        lines.append(f"- **Meals total:** {totals.get('meals_total',0)}")
-        if totals.get("seafood",0) > 0: lines.append(f"- **Seafood add-on (count):** {totals['seafood']}")
-        if totals.get("snack",0) > 0: lines.append(f"- **Snacks total:** {totals['snack']}")
-        if totals.get("juices_total",0) > 0:
+        lines = [f"- **Meals total:** {totals.get('meals_total',0)}"]
+        if totals.get("seafood",0)>0: lines.append(f"- **Seafood add-on (count):** {totals['seafood']}")
+        if totals.get("snack",0)>0:   lines.append(f"- **Snacks total:** {totals['snack']}")
+        if totals.get("juices_total",0)>0:
             lines.append(f"- **Juices total:** {totals['juices_total']} (J1: {totals.get('j1',0)}, J2: {totals.get('j2',0)})")
-        if totals.get("brk",0) > 0: lines.append(f"- **Breakfast total:** {totals['brk']}")
-        lines.append(f"- **Active days:** {st.session_state['active_days']}")
-        lines.append(f"- **Paused days:** {st.session_state['paused_days']}")
-        lines.append(f"- **Total days:** {st.session_state['total_days']}")
+        if totals.get("brk",0)>0:     lines.append(f"- **Breakfast total:** {totals['brk']}")
+        lines += [
+            f"- **Active days:** {st.session_state['active_days']}",
+            f"- **Paused days:** {st.session_state['paused_days']}",
+            f"- **Total days:** {st.session_state['total_days']}",
+        ]
         st.markdown("\n".join(lines))
         st.markdown("**Paused dates:** " + (", ".join(sorted({d.strftime('%d-%b-%Y') for d in st.session_state['paused_dates']})) if st.session_state['paused_dates'] else "None"))
 
         st.markdown("#### Next Cycle Planner")
-        nl = []
-        nl.append(f"- **Previous bill range:** {dtstr(st.session_state['prev_start'])} → {dtstr(st.session_state['prev_end'])}")
-        nl.append(f"- **Paused days to adjust:** {st.session_state['paused_days']}")
         adj_needed = st.session_state['paused_days']
+        notes = [
+            f"- **Previous bill range:** {dtstr(st.session_state['prev_start'])} → {dtstr(st.session_state['prev_end'])}",
+            f"- **Paused days to adjust:** {adj_needed}",
+        ]
         if adj_needed:
-            future_dates = next_service_calendar_dates(st.session_state['prev_end'], adj_needed)
-            nl.append(f"- **Adjustment dates:** " + ", ".join(dtstr(d) for d in future_dates))
+            adj_dates = next_service_calendar_dates(st.session_state['prev_end'], adj_needed)
+            notes.append("- **Adjustment dates:** " + ", ".join(dtstr(d) for d in adj_dates))
         else:
-            nl.append(f"- **Adjustment dates:** None")
-        nl.append(f"- **New bill start:** {dtstr(st.session_state['next_start']) if st.session_state['next_start'] else '—'}")
-        nl.append(f"- **New bill end:** {dtstr(st.session_state['next_end']) if st.session_state['next_end'] else '—'}")
-        st.markdown("\n".join(nl))
+            notes.append("- **Adjustment dates:** None")
+        notes += [
+            f"- **New bill start:** {dtstr(st.session_state['next_start'])}",
+            f"- **New bill end:** {dtstr(st.session_state['next_end'])}",
+        ]
+        st.markdown("\n".join(notes))
 
-        # SAVE next cycle
         c1, c2 = st.columns(2)
         if st.session_state["next_start"] and st.session_state["next_end"]:
             if c1.button("✅ Save Next Cycle to BillingCycle", use_container_width=True, key="save_cycle"):
                 try:
-                    if st.session_state["save_mode"] == "Update latest row" and st.session_state.get("last_row_number"):
+                    if st.session_state["save_mode"]=="Update latest row" and st.session_state.get("last_row_number"):
                         update_cycle_row(session, spid, st.session_state["last_row_number"],
                                          st.session_state["client"], st.session_state["next_start"], st.session_state["next_end"])
-                        st.success(f"Updated: {st.session_state['client']} | {dtstr(st.session_state['next_start'])} → {dtstr(st.session_state['next_end'])}")
+                        st.success("Updated BillingCycle.")
                     else:
                         append_cycle_row(session, spid, st.session_state["client"],
                                          st.session_state["next_start"], st.session_state["next_end"])
-                        st.success(f"Appended: {st.session_state['client']} | {dtstr(st.session_state['next_start'])} → {dtstr(st.session_state['next_end'])}")
+                        st.success("Appended to BillingCycle.")
                 except Exception as e:
-                    st.error(f"Failed to save: {e}")
+                    st.error(f"Save failed: {e}")
         st.info(f"Per-day delivery (learned): ₹{st.session_state['delivery_per_day']:.2f}")
 
-        # ===== Invoice =====
         st.markdown("---")
         st.markdown("### Invoice")
         colp, cold = st.columns(2)
         do_preview = colp.button("🖼️ Generate Preview", use_container_width=True, key="btn_preview")
         do_pdf     = cold.button("⬇️ Download PDF", use_container_width=True, key="btn_pdf")
 
-        # Build invoice rows (now includes Delivery)
         price_meal = settings["price_high_protein"] if st.session_state.get("admin_plan","Nutri")=="High Protein" else settings["price_nutri"]
         lines_for_preview = []
 
         def add_line(desc, qty, rate):
-            qty = int(qty) if qty else 0
-            rate = float(rate) if rate else 0.0
-            price = round(qty * rate)
+            qty_i  = int(qty) if qty else 0
+            rate_f = float(rate) if rate else 0.0
+            price  = round(qty_i * rate_f)
             lines_for_preview.append({
                 "desc": desc,
-                "qty": qty if qty else "",
-                "rate": f"{int(rate)}" if rate else "",
+                "qty": qty_i if qty_i else "",
+                "rate": f"{int(rate_f)}" if rate_f else "",
                 "price": f"{price}" if price else ""
             })
             return price
@@ -633,16 +579,16 @@ with mid_col:
         food_subtotal += add_line("Snack",          st.session_state.get("q_snack", 0),  settings["price_snack"])
 
         gst_amount = round(food_subtotal * (settings["gst_percent"]/100.0)) if settings["gst_percent"] else 0
-        # Delivery line (separate, no GST)
-        delivery_days = int(st.session_state.get("q_delivdays", 26) or 0)
-        delivery_rate = float(st.session_state.get("rate_deliv", 0.0) or 0.0)
+
+        # DELIVERY — now always added whenever qty>0 OR rate>0
+        delivery_days = int(st.session_state.get("q_delivdays", st.session_state.get("active_days", 0)) or 0)
+        delivery_rate = float(st.session_state.get("rate_deliv", st.session_state.get("delivery_per_day", 0.0)) or 0.0)
         delivery_amount = round(delivery_days * delivery_rate)
-        if delivery_days and delivery_rate:
+        if delivery_days > 0 or delivery_rate > 0:
             add_line("Delivery", delivery_days, delivery_rate)
 
         grand_total = round(food_subtotal + gst_amount + delivery_amount)
 
-        # Header strings for the template’s exact boxes
         dur_start_text = (st.session_state.get("adm_start") or "").strip()
         dur_end_text   = (st.session_state.get("adm_end") or "").strip()
         client_label   = (st.session_state.get("adm_client_lbl") or st.session_state.get("client","")).strip()
@@ -663,10 +609,10 @@ with mid_col:
             "total_value": f"₹{grand_total}",
         }
 
+        template_img = try_load_template()
         if (do_preview or do_pdf):
-            template_img = try_load_template()
             if not template_img:
-                st.error("Template PNG not found. Place `invoice_template_a4.png` in the app folder (or rename in code).")
+                st.error("Template PNG not found. Place `invoice_template_a4.png` beside the app.")
             else:
                 visible_rows = [r for r in lines_for_preview if (r["qty"] or r["price"])]
                 if not visible_rows:
@@ -683,43 +629,36 @@ with mid_col:
                         use_container_width=True
                     )
 
-# RIGHT CONSOLE (Admin)
-with right_col:
+# RIGHT — admin
+with right:
     st.markdown("### 🛠️ Admin")
     st.text_input("Client label (print as)", value=(st.session_state.get("adm_client_lbl") or st.session_state.get("client","")), key="adm_client_lbl")
     st.date_input("Billing date", value=(st.session_state.get("adm_bill_date") or date.today()), key="adm_bill_date")
     st.selectbox("Plan", ["Nutri", "High Protein"], index=(0 if st.session_state.get("admin_plan","Nutri")=="Nutri" else 1), key="admin_plan")
 
-    # Prefill next cycle dates into admin fields (only if empty)
-    def _prefill_date_text(d: Optional[date]) -> str:
-        return dtstr(d) if isinstance(d, date) else ""
+    def _prefill(d: Optional[date]) -> str: return dtstr(d) if isinstance(d,date) else ""
     if st.session_state["fetched"]:
-        if not st.session_state.get("adm_start"):
-            st.session_state["adm_start"] = _prefill_date_text(st.session_state["next_start"])
-        if not st.session_state.get("adm_end"):
-            st.session_state["adm_end"] = _prefill_date_text(st.session_state["next_end"])
+        if not st.session_state.get("adm_start"): st.session_state["adm_start"] = _prefill(st.session_state["next_start"])
+        if not st.session_state.get("adm_end"):   st.session_state["adm_end"]   = _prefill(st.session_state["next_end"])
 
     st.text_input("Bill start (dd-MMM-YYYY)", value=st.session_state.get("adm_start",""), key="adm_start")
     st.text_input("Bill end (dd-MMM-YYYY)",   value=st.session_state.get("adm_end",""),   key="adm_end")
-
     st.text_input("Invoice No.", value=st.session_state.get("admin_invoice_no",""), key="admin_invoice_no")
 
-    # Duration (auto default if both present; user can edit)
     auto_dur = ""
     if st.session_state.get("adm_start") and st.session_state.get("adm_end"):
         auto_dur = f"from {st.session_state['adm_start']} to {st.session_state['adm_end']}"
-        if not st.session_state.get("adm_dur"):
-            st.session_state["adm_dur"] = auto_dur
+        if not st.session_state.get("adm_dur"): st.session_state["adm_dur"] = auto_dur
     st.text_input("Bill duration text", value=st.session_state.get("adm_dur", auto_dur), key="adm_dur")
 
-    st.markdown("**Quantities (rates & GST in LEFT console)**")
+    st.markdown("**Quantities** *(rates & GST in left console)*")
     st.number_input("Meals qty", value=st.session_state.get("q_meals", 26), step=1, min_value=0, key="q_meals")
-    st.number_input("Delivery days", value=st.session_state.get("q_delivdays", 26), step=1, min_value=0, key="q_delivdays")
+    st.number_input("Delivery days", value=st.session_state.get("q_delivdays", st.session_state.get("active_days",0)), step=1, min_value=0, key="q_delivdays")
 
     c3, c4, c5 = st.columns(3)
     c3.number_input("Seafood qty", value=st.session_state.get("q_sea", 0), step=1, min_value=0, key="q_sea")
-    c4.number_input("Juice qty", value=st.session_state.get("q_juice", 0), step=1, min_value=0, key="q_juice")
-    c5.number_input("Snack qty", value=st.session_state.get("q_snack", 0), step=1, min_value=0, key="q_snack")
+    c4.number_input("Juice qty",   value=st.session_state.get("q_juice", 0), step=1, min_value=0, key="q_juice")
+    c5.number_input("Snack qty",   value=st.session_state.get("q_snack", 0), step=1, min_value=0, key="q_snack")
 
     c6, c7 = st.columns(2)
     c6.number_input("Breakfast qty", value=st.session_state.get("q_brk", 0), step=1, min_value=0, key="q_brk")
