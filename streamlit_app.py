@@ -2,11 +2,13 @@
 # -*- coding: utf-8 -*-
 
 # =========================================================
-# Friska Billing Web App — Simple BillingCycle tab workflow
-# UI: enter Client only
-# Reads previous Start/End from Sheet:'BillingCycle' (Client|Start|End)
-# Computes Usage Summary + Next Cycle (Mon–Sat; paused days first)
-# Button "Save next cycle" appends Client|NextStart|NextEnd to BillingCycle
+# Friska Billing – Usage + Next Cycle + Admin Panel + BillingCycle write (update/append)
+# UI flow:
+#   1) Enter Client
+#   2) App reads previous cycle from 'BillingCycle' (Client|Start|End)
+#   3) Shows Usage Summary + Next Cycle (Mon–Sat; pauses first)
+#   4) Admin Panel (right): editable fields for upcoming bill (no PDF yet)
+#   5) Save next cycle -> Update latest row or Append new row (toggle)
 # =========================================================
 
 import streamlit as st
@@ -20,25 +22,36 @@ from google.auth.transport.requests import AuthorizedSession
 SHEET_URL = "https://docs.google.com/spreadsheets/d/1CsT6_oYsFjgQQ73pt1Bl1cuXuzKY8JnOTB3E4bDkTiA/edit?usp=sharing"
 BILLING_TAB = "BillingCycle"   # must exist with headers: Client | Start | End
 
-# Data tabs layout (already in your file)
+# Data tabs layout (clientlist)
 COL_B_CLIENT = 1
 COL_C_TYPE   = 2
 COL_G_DELIVERY = 6
 START_DATA_COL_IDX = 7   # H
 COLUMNS_PER_BLOCK  = 6   # Meal1, Meal2, Snack, J1, J2, Breakfast
 
-# Need WRITE scope now (to append next cycle)
+# Need WRITE scope
 SCOPES = [
     "https://www.googleapis.com/auth/spreadsheets",
     "https://www.googleapis.com/auth/drive.readonly",
 ]
+
+SETTINGS_FILE = "settings.json"
+DEFAULT_SETTINGS = {
+    "price_nutri": 180.0,
+    "price_high_protein": 200.0,
+    "price_seafood_addon": 80.0,
+    "price_juice": 0.0,
+    "price_snack": 0.0,
+    "price_breakfast": 0.0,
+    "gst_percent": 5.0,
+}
 
 # ---------- Secrets / Auth ----------
 def get_service_account_session() -> AuthorizedSession:
     try:
         sec = st.secrets["gcp_credentials"]
     except Exception:
-        st.error("Secrets missing: Add your Service Account JSON under [gcp_credentials].")
+        st.error("Secrets missing: Add Service Account JSON under [gcp_credentials].")
         st.stop()
     try:
         sa_info = json.loads(sec["value"]) if isinstance(sec, dict) and "value" in sec else dict(sec)
@@ -48,10 +61,6 @@ def get_service_account_session() -> AuthorizedSession:
         st.error(f"Could not initialize Google credentials: {e}")
         st.stop()
 
-# ---------- Helpers ----------
-WEEKDAY_PREFIX = re.compile(
-    r"^\s*(Mon|Tue|Wed|Thu|Fri|Sat|Sun|Monday|Tuesday|Wednesday|Thursday|Friday|Saturday|Sunday)\s*,\s*", re.I
-)
 def get_spreadsheet_id(url: str) -> str:
     m = re.search(r"/spreadsheets/d/([a-zA-Z0-9-_]+)", url)
     if not m:
@@ -59,6 +68,23 @@ def get_spreadsheet_id(url: str) -> str:
         st.stop()
     return m.group(1)
 
+# ---------- Settings I/O ----------
+def load_settings():
+    try:
+        with open(SETTINGS_FILE, "r", encoding="utf-8") as f:
+            return {**DEFAULT_SETTINGS, **json.load(f)}
+    except Exception:
+        return DEFAULT_SETTINGS.copy()
+
+def save_settings(s: dict):
+    with open(SETTINGS_FILE, "w", encoding="utf-8") as f:
+        json.dump(s, f, indent=2)
+
+# ---------- Helpers ----------
+WEEKDAY_PREFIX = re.compile(
+    r"^\s*(Mon|Tue|Wed|Thu|Fri|Sat|Sun|Monday|Tuesday|Wednesday|Thursday|Friday|Saturday|Sunday)\s*,\s*",
+    re.I
+)
 def to_dt(v) -> Optional[datetime]:
     if isinstance(v, (int, float)):
         return datetime(1899, 12, 30) + timedelta(days=float(v))
@@ -89,7 +115,7 @@ def fetch_values(session: AuthorizedSession, spid: str, a1_range: str) -> List[L
     url = f"https://sheets.googleapis.com/v4/spreadsheets/{spid}/values/{enc}"
     r = session.get(url, params={"valueRenderOption": "UNFORMATTED_VALUE"}, timeout=30)
     if r.status_code == 403:
-        st.error("Permission denied by Google Sheets API. Share the Sheet with the service account (Viewer/Editor).")
+        st.error("Google Sheets permission denied. Share the file with the service account (Editor).")
         st.stop()
     r.raise_for_status()
     return r.json().get("values", []) or []
@@ -102,6 +128,16 @@ def append_values(session: AuthorizedSession, spid: str, sheet: str, rows: List[
     r.raise_for_status()
     return r.json()
 
+def update_values(session: AuthorizedSession, spid: str, range_a1: str, rows: List[List[str]]):
+    # values.update replaces the given range
+    url = f"https://sheets.googleapis.com/v4/spreadsheets/{spid}/values/{range_a1}"
+    params = {"valueInputOption": "RAW"}
+    body = {"range": range_a1, "values": rows, "majorDimension": "ROWS"}
+    r = session.put(url, params=params, json=body, timeout=30)
+    r.raise_for_status()
+    return r.json()
+
+# ---------- ClientList helpers ----------
 def get_clientlist_sheet_title(session: AuthorizedSession, spid: str, month_full: str) -> Tuple[Optional[str], List[str]]:
     desired1 = f"clientlist {month_full}".lower()
     desired2 = f"clientlist {month_full[:3]}".lower()
@@ -133,23 +169,22 @@ def parse_float(x) -> float:
 def compute_delivery_per_day_for_rows(rows: List[int], data: List[List[str]]):
     if not rows:
         return 0.0, "none", []
-    types, prices, details = [], [], []
+    types, prices = [], []
     for r in rows:
         row = data[r] if r < len(data) else []
         typ = str(row[COL_C_TYPE]).strip() if len(row) > COL_C_TYPE else ""
         price = parse_float(row[COL_G_DELIVERY] if len(row) > COL_G_DELIVERY else "")
-        types.append(typ); prices.append(price)
-        details.append({"row": str(r+1), "type": typ, "price": f"{price:.2f}"})
-    norm_types = [norm_name(t) for t in types]
-    def all_equal(vals): return len(vals)>0 and len(set(vals))==1
-    has_morning = any("morning" in t for t in norm_types)
-    has_evening = any("evening" in t for t in norm_types)
-    if all_equal(norm_types): return (max(prices) if prices else 0.0), "single_identical", details
+        types.append(norm_name(typ)); prices.append(price)
+    has_morning = any("morning" in t for t in types)
+    has_evening = any("evening" in t for t in types)
+    all_equal = len(set(types)) == 1 if types else False
+    if all_equal:
+        return (max(prices) if prices else 0.0), "single_identical", []
     if has_morning or has_evening:
-        if all(t == "morning delivery" for t in norm_types) or all(t == "evening delivery" for t in norm_types):
-            return (max(prices) if prices else 0.0), "single_identical", details
-        return (sum(prices) if prices else 0.0), "sum_shifts", details
-    return (max(prices) if prices else 0.0), "single_mismatch", details
+        if all(t == "morning delivery" for t in types) or all(t == "evening delivery" for t in types):
+            return (max(prices) if prices else 0.0), "single_identical", []
+        return (sum(prices) if prices else 0.0), "sum_shifts", []
+    return (max(prices) if prices else 0.0), "single_mismatch", []
 
 # ---------- Usage counting ----------
 def count_usage(session: AuthorizedSession, spid: str, start: date, end: date, client_name: str):
@@ -159,6 +194,7 @@ def count_usage(session: AuthorizedSession, spid: str, start: date, end: date, c
     active_days = 0
     paused_dates: List[date] = []
     delivery_amount_total = 0.0
+    last_per_day_delivery = 0.0
 
     for (yy, mm) in month_span_inclusive(start, end):
         month_name = calendar.month_name[mm]
@@ -191,6 +227,7 @@ def count_usage(session: AuthorizedSession, spid: str, start: date, end: date, c
 
         # delivery per-day price for this month
         per_day_delivery, _, _ = compute_delivery_per_day_for_rows(client_rows, data)
+        last_per_day_delivery = per_day_delivery or last_per_day_delivery
 
         # iterate days
         service_days_this_month = 0
@@ -220,7 +257,7 @@ def count_usage(session: AuthorizedSession, spid: str, start: date, end: date, c
     totals["meals_total"]  = totals["meal1"] + totals["meal2"]
     totals["juices_total"] = totals["j1"] + totals["j2"]
     paused_days = max(0, total_days - active_days)
-    return totals, active_days, paused_days, total_days, paused_dates, delivery_amount_total
+    return totals, active_days, paused_days, total_days, paused_dates, delivery_amount_total, last_per_day_delivery
 
 # ---------- Next dates (Mon–Sat only) ----------
 def next_service_calendar_dates(after_day: date, needed: int) -> List[date]:
@@ -233,7 +270,7 @@ def next_service_calendar_dates(after_day: date, needed: int) -> List[date]:
     return out
 
 # ---------- BillingCycle I/O ----------
-def get_prev_cycle_for_client(session: AuthorizedSession, spid: str, client_name: str) -> Tuple[date, date]:
+def get_prev_cycle_for_client(session: AuthorizedSession, spid: str, client_name: str) -> Tuple[date, date, int]:
     vals = fetch_values(session, spid, f"{BILLING_TAB}!A1:C10000")
     if not vals or len(vals) < 2:
         raise RuntimeError(f"'{BILLING_TAB}' has no data. Create headers 'Client | Start | End' and at least one row.")
@@ -246,53 +283,95 @@ def get_prev_cycle_for_client(session: AuthorizedSession, spid: str, client_name
 
     key = norm_name(client_name)
     last_row = None
-    for r in vals[1:]:
+    last_row_index = None  # 0-based within vals
+    for idx, r in enumerate(vals[1:], start=1):
         if len(r) <= max(ci, si, ei): continue
         if norm_name(r[ci]) == key:
             last_row = r
+            last_row_index = idx
 
-    if not last_row:
+    if last_row is None:
         raise RuntimeError(f"No row found in '{BILLING_TAB}' for client '{client_name}'. Add one: Client | Start | End.")
 
     sd = to_dt(last_row[si]); ed = to_dt(last_row[ei])
     if not sd or not ed:
         raise RuntimeError(f"Invalid Start/End for '{client_name}' in '{BILLING_TAB}'. Use dates like 02-Nov-2025.")
-    return sd.date(), ed.date()
+    # Convert to 1-based sheet row number
+    sheet_row_number = last_row_index + 1  # since vals[0] is header (row 1 in sheet)
+    return sd.date(), ed.date(), sheet_row_number
 
-def save_next_cycle(session: AuthorizedSession, spid: str, client_name: str, next_start: date, next_end: date):
-    row = [client_name, dtstr(next_start), dtstr(next_end)]
-    return append_values(session, spid, BILLING_TAB, [row])
+def save_next_cycle_update_or_append(session: AuthorizedSession, spid: str, client_name: str,
+                                     next_start: date, next_end: date,
+                                     mode: str, last_row_number: Optional[int]):
+    # mode: "update" or "append"
+    if mode == "update" and last_row_number:
+        # Update row N (A..C)
+        range_a1 = f"{BILLING_TAB}!A{last_row_number+1}:C{last_row_number+1}"
+        rows = [[client_name, dtstr(next_start), dtstr(next_end)]]
+        return update_values(session, spid, range_a1, rows)
+    else:
+        row = [client_name, dtstr(next_start), dtstr(next_end)]
+        return append_values(session, spid, BILLING_TAB, [row])
 
 # ---------------- UI ----------------
-st.set_page_config(page_title="Friska Billing", page_icon="💼", layout="centered")
+st.set_page_config(page_title="Friska Billing", page_icon="💼", layout="wide")
 st.title("🥗 Friska Wellness — Billing System")
 
 session = get_service_account_session()
 spid = get_spreadsheet_id(SHEET_URL)
 
+# ---------- LEFT: Prices console ----------
+settings = load_settings()
 with st.sidebar:
-    st.header("How it works")
-    st.write(
-        "1) Enter **Client**\n\n"
-        "2) App reads **Start/End** from `BillingCycle` tab\n\n"
-        "3) Shows **Usage Summary** + **Next Cycle**\n\n"
-        "4) Click **Save next cycle** to append new dates to `BillingCycle`"
-    )
+    st.header("⚙️ Prices (saved)")
+    c1, c2 = st.columns(2)
+    settings["price_nutri"] = c1.number_input("Nutri (₹)", value=float(settings["price_nutri"]), step=5.0)
+    settings["price_high_protein"] = c2.number_input("High Protein (₹)", value=float(settings["price_high_protein"]), step=5.0)
+    settings["price_seafood_addon"] = st.number_input("Seafood add-on (₹)", value=float(settings["price_seafood_addon"]), step=5.0)
 
-client = st.text_input("Client name (must exist in BillingCycle)")
+    st.markdown("**Add-ons**")
+    c3, c4, c5 = st.columns(3)
+    settings["price_juice"] = c3.number_input("Juice (₹)", value=float(settings["price_juice"]), step=5.0)
+    settings["price_snack"] = c4.number_input("Snack (₹)", value=float(settings["price_snack"]), step=5.0)
+    settings["price_breakfast"] = c5.number_input("Breakfast (₹)", value=float(settings["price_breakfast"]), step=5.0)
 
-if st.button("📊 Fetch Usage & Plan", use_container_width=True):
+    settings["gst_percent"] = st.number_input("GST % (food only; delivery excluded)", value=float(settings["gst_percent"]), step=1.0, min_value=0.0)
+
+    if st.button("💾 Save settings", use_container_width=True):
+        save_settings(settings)
+        st.success("Saved.")
+
+# ---------- MAIN: client input + fetch ----------
+cA, cB = st.columns([2, 1])
+client = cA.text_input("Client name (must exist in BillingCycle)")
+save_mode = cB.selectbox("Save mode", ["Update latest row", "Append new row"])
+
+fetch_btn = st.button("📊 Fetch Usage & Plan", use_container_width=True)
+
+# Placeholders to share between sections
+next_start = None
+next_end = None
+last_row_number = None
+autodetected_plan = "Nutri"  # default fallback
+
+if fetch_btn:
     if not client.strip():
-        st.error("Enter client name."); st.stop()
+        st.error("Enter client name.")
+        st.stop()
 
     try:
-        prev_start, prev_end = get_prev_cycle_for_client(session, spid, client)
+        prev_start, prev_end, last_row_number = get_prev_cycle_for_client(session, spid, client)
     except Exception as e:
         st.error(str(e)); st.stop()
 
-    totals, active_days, paused_days, total_days, paused_dates, _ = count_usage(
+    totals, active_days, paused_days, total_days, paused_dates, _delivery_amount, last_per_day_delivery = count_usage(
         session, spid, prev_start, prev_end, client
     )
+
+    # ----- Auto-detect plan from last cycle Type signal -----
+    # Simple heuristic: if seafood count>0 or meal counts exist, we don't actually know plan; we keep default.
+    # If you want strict detection from column C per active day (majority voting), we can add; for now keep manual override in Admin panel with a preview guess.
+    autodetected_plan = "High Protein" if settings.get("price_high_protein", 0) > settings.get("price_nutri", 0) and totals["meals_total"] else "Nutri"
 
     # ----- Usage Summary -----
     st.subheader("Usage Summary")
@@ -332,11 +411,57 @@ if st.button("📊 Fetch Usage & Plan", use_container_width=True):
     nl.append(f"- **New bill end:** {dtstr(next_end) if next_end else '—'}")
     st.markdown("\n".join(nl))
 
-    # ----- Save next cycle -----
+    st.info(f"Per-day delivery (from last cycle logic): ₹{last_per_day_delivery:.2f} (editable in Admin panel)")
+
+    # ----- Save next cycle buttons -----
     if next_start and next_end:
-        if st.button("✅ Save next cycle to BillingCycle", use_container_width=True):
+        colx, coly = st.columns(2)
+        if colx.button("✅ Save next cycle to BillingCycle", use_container_width=True):
             try:
-                save_next_cycle(session, spid, client, next_start, next_end)
-                st.success(f"Saved to '{BILLING_TAB}': {client} | {dtstr(next_start)} → {dtstr(next_end)}")
+                mode = "update" if save_mode == "Update latest row" else "append"
+                save_next_cycle_update_or_append(session, spid, client, next_start, next_end, mode, last_row_number)
+                st.success(f"Saved ({mode}) in '{BILLING_TAB}': {client} | {dtstr(next_start)} → {dtstr(next_end)}")
             except Exception as e:
                 st.error(f"Failed to save: {e}")
+
+# ---------- RIGHT: Admin panel (sticky) ----------
+st.markdown("---")
+st.subheader("🛠️ Admin — Upcoming Bill Overrides (Preview Only)")
+with st.container():
+    c1, c2, c3 = st.columns([2,1,1])
+    admin_client_label = c1.text_input("Client label (print as)", value=client or "")
+    admin_billing_date = c2.date_input("Billing date", value=date.today())
+    admin_plan = c3.selectbox("Plan", ["Nutri", "High Protein"], index=(0 if (autodetected_plan=="Nutri") else 1))
+
+    c4, c5 = st.columns(2)
+    admin_bill_start = c4.text_input("Bill start (dd-MMM-YYYY)", value=(dtstr(next_start) if next_start else ""))
+    admin_bill_end   = c5.text_input("Bill end (dd-MMM-YYYY)",   value=(dtstr(next_end) if next_end else ""))
+
+    st.markdown("**Qty / Rate (defaults)**")
+    q1, r1 = st.columns(2)
+    meals_qty = q1.number_input("Meals qty", value=26, step=1, min_value=0)
+    meals_rate = r1.number_input("Meals rate (₹)", value=float(settings["price_high_protein"] if admin_plan=="High Protein" else settings["price_nutri"]), step=5.0)
+
+    q2, r2 = st.columns(2)
+    seafood_qty = q2.number_input("Seafood qty", value=26, step=1, min_value=0)
+    seafood_rate = r2.number_input("Seafood rate (₹)", value=float(settings["price_seafood_addon"]), step=5.0)
+
+    q3, r3 = st.columns(2)
+    juice_qty = q3.number_input("Juice qty", value=26, step=1, min_value=0)
+    juice_rate = r3.number_input("Juice rate (₹)", value=float(settings["price_juice"]), step=5.0)
+
+    q4, r4 = st.columns(2)
+    snack_qty = q4.number_input("Snack qty", value=26, step=1, min_value=0)
+    snack_rate = r4.number_input("Snack rate (₹)", value=float(settings["price_snack"]), step=5.0)
+
+    q5, r5 = st.columns(2)
+    breakfast_qty = q5.number_input("Breakfast qty", value=26, step=1, min_value=0)
+    breakfast_rate = r5.number_input("Breakfast rate (₹)", value=float(settings["price_breakfast"]), step=5.0)
+
+    q6, r6 = st.columns(2)
+    delivery_days = q6.number_input("Delivery days", value=26, step=1, min_value=0)
+    delivery_per_day = r6.number_input("Delivery per day (₹)", value=0.0, step=5.0, help="Prefill from last cycle shown above")
+
+    gst_pct = st.number_input("GST % (food items only)", value=float(settings["gst_percent"]), step=1.0, min_value=0.0)
+
+    st.caption("Preview actions coming next: Generate on-page invoice image (for screenshot) and optional PDF + log.")
