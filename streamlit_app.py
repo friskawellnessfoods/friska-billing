@@ -3,16 +3,9 @@
 
 # =========================================================
 # Friska Billing Web App — Streamlit Cloud + Service Account
-# - Counts meals/snacks/juices/breakfast/seafood + delivery
-# - Delivery from sheet (col G) with custom shift rules
-# - GST settings kept (not used here since Draft Bill removed)
-# - Usage Summary:
-#     * Meals total only (no Meal1/Meal2 split)
-#     * Show Seafood/Snacks/Juices/Breakfast only if > 0
-#     * Show Active, Paused, Total days (from headers) and Paused dates list
-# - Next Cycle Planner (calendar-based, Mon–Sat only):
-#     * First paused_days = Adjustment days (listed)
-#     * Next 26 days = New billing window (show only start & end, not the full list)
+# - Usage Summary: meals total only; conditional parts; Active/Paused/Total days (+ paused dates)
+# - Next Cycle Planner: calendar-based (Mon–Sat), shows bold line-by-line like Usage Summary
+# - Delivery rules + data reading unchanged
 # =========================================================
 
 import streamlit as st
@@ -164,84 +157,56 @@ def parse_float(x) -> float:
 
 # --------- Delivery pricing logic ----------
 def compute_delivery_per_day_for_rows(rows: List[int], data: List[List[str]]):
-    """
-    Returns (per_day_price, mode, details)
-    mode ∈ {"single_identical", "sum_shifts", "single_mismatch", "none"}
-    """
     if not rows:
         return 0.0, "none", []
-
     types, prices, details = [], [], []
     for r in rows:
         row = data[r] if r < len(data) else []
         typ = str(row[COL_C_TYPE]).strip() if len(row) > COL_C_TYPE else ""
         price = parse_float(row[COL_G_DELIVERY] if len(row) > COL_G_DELIVERY else "")
-        types.append(typ)
-        prices.append(price)
+        types.append(typ); prices.append(price)
         details.append({"row": str(r+1), "type": typ, "price": f"{price:.2f}"})
-
     norm_types = [norm_name(t) for t in types]
-    def all_equal(vals: List[str]) -> bool:
-        return len(vals) > 0 and len(set(vals)) == 1
-
+    def all_equal(vals: List[str]) -> bool: return len(vals) > 0 and len(set(vals)) == 1
     has_morning = any("morning" in t for t in norm_types)
     has_evening = any("evening" in t for t in norm_types)
-
     if all_equal(norm_types):
-        per_day = max(prices) if prices else 0.0
-        return per_day, "single_identical", details
-
+        return (max(prices) if prices else 0.0), "single_identical", details
     if has_morning or has_evening:
         if all(t == "morning delivery" for t in norm_types) or all(t == "evening delivery" for t in norm_types):
-            per_day = max(prices) if prices else 0.0
-            return per_day, "single_identical", details
-        per_day = sum(prices) if prices else 0.0
-        return per_day, "sum_shifts", details
-
-    per_day = max(prices) if prices else 0.0
-    return per_day, "single_mismatch", details
+            return (max(prices) if prices else 0.0), "single_identical", details
+        return (sum(prices) if prices else 0.0), "sum_shifts", details
+    return (max(prices) if prices else 0.0), "single_mismatch", details
 
 # --------- Count usage in given range (header-driven) ----------
 def count_usage(session: AuthorizedSession, spid: str, start: date, end: date, client_name: str, debug: bool=False):
     client_key = norm_name(client_name)
     totals = dict(meal1=0, meal2=0, snack=0, j1=0, j2=0, brk=0, seafood=0)
-    total_days = 0      # header dates present in sheet within range
+    total_days = 0
     active_days = 0
     paused_dates: List[date] = []
     delivery_amount_total = 0.0
 
-    diag = {
-        "months": [],
-        "tabs_checked": [],
-        "dates_seen": {},
-        "client_found_rows": {},
-        "delivery_by_month": []
-    }
+    diag = {"months": [], "tabs_checked": [], "dates_seen": {}, "client_found_rows": {}, "delivery_by_month": []}
 
     for (yy, mm) in month_span_inclusive(start, end):
         month_name = calendar.month_name[mm]
         sheet_title, all_titles = get_clientlist_sheet_title(session, spid, month_name)
         diag["months"].append(month_name)
         diag["tabs_checked"].append({"month": month_name, "resolved_tab": sheet_title, "all_tabs": all_titles})
-        if not sheet_title:
-            continue
+        if not sheet_title: continue
 
         data = fetch_values(session, spid, f"{sheet_title}!A1:ZZ2000")
-        if not data:
-            continue
+        if not data: continue
 
-        # map client rows
         lut = {}
         for r, row in enumerate(data):
             name = norm_name(row[COL_B_CLIENT]) if len(row) > COL_B_CLIENT else ""
-            if name:
-                lut.setdefault(name, []).append(r)
+            if name: lut.setdefault(name, []).append(r)
         client_rows = lut.get(client_key, [])
 
-        # dates on row 1 -> map & collect dates in range for this tab
         row1 = data[0] if data else []
-        date_to_block = {}
-        header_dates_in_range = []
+        date_to_block = {}; header_dates_in_range = []
         c = START_DATA_COL_IDX
         while c < len(row1):
             dt = to_dt(row1[c]) if c < len(row1) else None
@@ -251,28 +216,21 @@ def count_usage(session: AuthorizedSession, spid: str, start: date, end: date, c
                 if start <= d <= end:
                     header_dates_in_range.append(d)
             else:
-                if date_to_block and (c >= len(row1) or not str(row1[c]).strip()):
-                    break
+                if date_to_block and (c >= len(row1) or not str(row1[c]).strip()): break
             c += COLUMNS_PER_BLOCK
         diag["dates_seen"][sheet_title] = [d.strftime("%d-%b-%y") for d in sorted(header_dates_in_range)]
 
-        # delivery per-day price & mode for this tab
         per_day_delivery, delivery_mode, delivery_details = compute_delivery_per_day_for_rows(client_rows, data)
 
-        # iterate ONLY header dates that are in range
         service_days_this_month = 0
         for d in header_dates_in_range:
-            block = date_to_block.get(d)
-            rows = client_rows
-            if block is None or not rows:
-                continue
-
+            block = date_to_block.get(d); rows = client_rows
+            if block is None or not rows: continue
             m1=m2=sn=j1=j2=bk=sf=0
             for r in rows:
                 row = data[r]
                 def cell(ci): return row[ci] if ci < len(row) else ""
-                v1 = str(cell(block)).strip()
-                v2 = str(cell(block+1)).strip()
+                v1 = str(cell(block)).strip(); v2 = str(cell(block+1)).strip()
                 if v1:
                     m1 += 1
                     if norm_name(v1) == "seafood 1": sf += 1
@@ -283,48 +241,34 @@ def count_usage(session: AuthorizedSession, spid: str, start: date, end: date, c
                 if str(cell(block+3)).strip(): j1 += 1
                 if str(cell(block+4)).strip(): j2 += 1
                 if str(cell(block+5)).strip(): bk += 1
-
             if (m1+m2+sn+j1+j2+bk) > 0:
                 service_days_this_month += 1
             else:
                 paused_dates.append(d)
+            totals["meal1"] += m1; totals["meal2"] += m2
+            totals["snack"] += sn; totals["j1"] += j1; totals["j2"] += j2
+            totals["brk"] += bk; totals["seafood"] += sf
 
-            totals["meal1"] += m1
-            totals["meal2"] += m2
-            totals["snack"] += sn
-            totals["j1"]    += j1
-            totals["j2"]    += j2
-            totals["brk"]   += bk
-            totals["seafood"] += sf
-
-        # accumulate per month
         total_days += len(header_dates_in_range)
         active_days += service_days_this_month
         delivery_amount_total += per_day_delivery * service_days_this_month
         diag["delivery_by_month"].append({
-            "month": month_name,
-            "tab": sheet_title,
-            "mode": delivery_mode,
-            "per_day": per_day_delivery,
-            "service_days": service_days_this_month,
+            "month": month_name, "tab": sheet_title, "mode": delivery_mode,
+            "per_day": per_day_delivery, "service_days": service_days_this_month,
             "row_details": delivery_details
         })
 
     totals["meals_total"]  = totals["meal1"] + totals["meal2"]
     totals["juices_total"] = totals["j1"] + totals["j2"]
-    paused_days = max(0, total_days - active_days)  # should match len(paused_dates)
+    paused_days = max(0, total_days - active_days)
     return totals, active_days, paused_days, total_days, paused_dates, delivery_amount_total, diag
 
 # --------- Calendar-based future dates (skip Sundays) ----------
 def next_service_calendar_dates(after_day: date, needed: int) -> List[date]:
-    """
-    Returns the next `needed` calendar dates after `after_day`,
-    skipping Sundays (weekday() == 6). Mon=0 ... Sun=6.
-    """
     out: List[date] = []
     cur = after_day + timedelta(days=1)
     while len(out) < needed:
-        if cur.weekday() != 6:  # skip Sundays
+        if cur.weekday() != 6:  # Sun=6
             out.append(cur)
         cur += timedelta(days=1)
     return out
@@ -343,19 +287,15 @@ with st.sidebar:
     settings["price_nutri"] = c1.number_input("Nutri (₹)", value=float(settings["price_nutri"]), step=5.0)
     settings["price_high_protein"] = c2.number_input("High Protein (₹)", value=float(settings["price_high_protein"]), step=5.0)
     settings["price_seafood_addon"] = st.number_input("Seafood add-on (₹)", value=float(settings["price_seafood_addon"]), step=5.0)
-
     st.markdown("**Add-on prices**")
     c3, c4, c5 = st.columns(3)
     settings["price_juice"] = c3.number_input("Juice (₹)", value=float(settings["price_juice"]), step=5.0)
     settings["price_snack"] = c4.number_input("Snack (₹)", value=float(settings["price_snack"]), step=5.0)
     settings["price_breakfast"] = c5.number_input("Breakfast (₹)", value=float(settings["price_breakfast"]), step=5.0)
-
     settings["gst_percent"] = st.number_input("GST % (food only; delivery excluded)", value=float(settings["gst_percent"]), step=1.0, min_value=0.0)
-
     debug = st.checkbox("Show debug details")
     if st.button("💾 Save settings", use_container_width=True):
-        save_settings(settings)
-        st.success("Saved.")
+        save_settings(settings); st.success("Saved.")
 
 cA, cB = st.columns(2)
 client = cA.text_input("Client name")
@@ -375,10 +315,9 @@ if st.button("📊 Fetch Usage", use_container_width=True):
                  session, spid, start, end, client, debug=debug
              )
         except Exception as e:
-            st.error(f"Processing failed: {e}")
-            st.stop()
+            st.error(f"Processing failed: {e}"); st.stop()
 
-        # ----- Usage Summary (formatted with conditional parts) -----
+        # ----- Usage Summary (bold, minimal) -----
         st.subheader("Usage Summary")
         lines = []
         lines.append(f"- **Meals total:** {totals['meals_total']}")
@@ -387,36 +326,37 @@ if st.button("📊 Fetch Usage", use_container_width=True):
         if totals["snack"] > 0:
             lines.append(f"- **Snacks total:** {totals['snack']}")
         if totals["juices_total"] > 0:
+            # still include breakdown in parentheses if present
             lines.append(f"- **Juices total:** {totals['juices_total']} (J1: {totals['j1']}, J2: {totals['j2']})")
         if totals["brk"] > 0:
             lines.append(f"- **Breakfast total:** {totals['brk']}")
         lines.append(f"- **Active days:** {active_days}")
         lines.append(f"- **Paused days:** {paused_days}")
-        lines.append(f"- **Total days in range (from headers):** {total_days}")
-
+        lines.append(f"- **Total days:** {total_days}")
         st.markdown("\n".join(lines))
 
         # Paused dates list
         st.markdown("**Paused dates:** " + (", ".join(sorted({d.strftime('%d-%b-%Y') for d in paused_dates})) if paused_dates else "None"))
 
-        # ---------- Next Cycle Planner (calendar-based, skip Sundays) ----------
-        st.subheader("Next Cycle Planner (26 days; Sundays excluded)")
+        # ---------- Next Cycle Planner (calendar-based, bold like summary) ----------
+        st.subheader("Next Cycle Planner")
         needed_adjust = paused_days
         needed_bill   = 26
         future_needed = needed_adjust + needed_bill
+        future_dates  = next_service_calendar_dates(end, future_needed)
+        adj_dates     = future_dates[:needed_adjust]
+        bill_dates    = future_dates[needed_adjust:needed_adjust+needed_bill]
 
-        future_dates = next_service_calendar_dates(end, future_needed)
-        adj_dates  = future_dates[:needed_adjust]
-        bill_dates = future_dates[needed_adjust:needed_adjust+needed_bill]
-
-        st.write({
-            "Previous bill range": f"{start.strftime('%d-%b-%Y')} → {end.strftime('%d-%b-%Y')}",
-            "Paused days to adjust": needed_adjust,
-            "Adjustment dates": [d.strftime("%d-%b-%Y") for d in adj_dates],
-            "New bill (26 days) start": bill_dates[0].strftime("%d-%b-%Y") if bill_dates else "—",
-            "New bill (26 days) end": bill_dates[-1].strftime("%d-%b-%Y") if bill_dates else "—",
-            # Intentionally NOT listing the 26 dates
-        })
+        next_lines = []
+        next_lines.append(f"- **Previous bill range:** {start.strftime('%d-%b-%Y')} → {end.strftime('%d-%b-%Y')}")
+        next_lines.append(f"- **Paused days to adjust:** {needed_adjust}")
+        if adj_dates:
+            next_lines.append(f"- **Adjustment dates:** " + ", ".join(d.strftime("%d-%b-%Y") for d in adj_dates))
+        else:
+            next_lines.append(f"- **Adjustment dates:** None")
+        next_lines.append(f"- **New bill start:** {bill_dates[0].strftime('%d-%b-%Y') if bill_dates else '—'}")
+        next_lines.append(f"- **New bill end:** {bill_dates[-1].strftime('%d-%b-%Y') if bill_dates else '—'}")
+        st.markdown("\n".join(next_lines))
 
         st.success("Usage and next cycle planned.")
 
