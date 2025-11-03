@@ -3,11 +3,12 @@
 
 # =========================================================
 # Friska Wellness — Billing System (Streamlit)
-# - Dual consoles (Left=Prices, Right=Admin)
-# - Center stage (Fetch, Usage Summary, Next Cycle, Preview/PDF)
-# - Manual date override for new clients / power control
+# - Prices console (left), Admin console (right)
+# - Center: Fetch usage, Next Cycle, Save, Invoice Preview/PDF
+# - Manual override for new clients
 # - BillingCycle update/append
-# - Invoice renderer aligned to labeled PNG template
+# - Template renderer aligned to your labelled PNG
+#   (with tighter header/table/GST/TOTAL placement + Delivery line)
 # =========================================================
 
 import streamlit as st
@@ -20,9 +21,9 @@ from PIL import Image, ImageDraw, ImageFont
 
 # ---------- CONFIG ----------
 SHEET_URL = "https://docs.google.com/spreadsheets/d/1CsT6_oYsFjgQQ73pt1Bl1cuXuzKY8JnOTB3E4bDkTiA/edit?usp=sharing"
-BILLING_TAB = "BillingCycle"   # Row1 headers: Client | Start | End
+BILLING_TAB = "BillingCycle"   # Row1: Client | Start | End
 
-# Clientlist layout (your sheet structure)
+# Clientlist layout
 COL_B_CLIENT = 1
 COL_C_TYPE   = 2
 COL_G_DELIVERY = 6
@@ -45,7 +46,7 @@ DEFAULT_SETTINGS = {
     "gst_percent": 5.0,
 }
 
-# ---------- Template + layout (aligned to your labeled PNG) ----------
+# ---------- Template + layout ----------
 TEMPLATE_CANDIDATES = [
     "invoice_template_a4.png",
     "invoice_template.png",
@@ -53,40 +54,45 @@ TEMPLATE_CANDIDATES = [
     "assets/invoice_template.png",
 ]
 
+# Fine-tuned for your screenshots
 LAYOUT = {
     "fonts": {
         "regular": ["DejaVuSans.ttf", "/usr/share/fonts/truetype/dejavu/DejaVuSans.ttf", "arial.ttf"],
         "bold":    ["DejaVuSans-Bold.ttf", "/usr/share/fonts/truetype/dejavu/DejaVuSans-Bold.ttf", "arialbd.ttf"],
-        "scale": 0.0078,  # base font size ~0.78% of image height
+        "scale": 0.0078,
     },
+    # Header cells (slightly right & down to align with name)
     "header": {
-        # Bill Duration row (top row under logo)
-        "dur_start":  {"xy": (16.0, 16.3), "size": 1.55, "bold": False, "align": "left"},
-        "dur_end":    {"xy": (41.5, 16.3), "size": 1.55, "bold": False, "align": "left"},
+        # Top row under logo
+        "dur_start":  {"xy": (16.6, 16.6), "size": 1.55, "bold": False, "align": "left"},
+        "dur_end":    {"xy": (42.0, 16.6), "size": 1.55, "bold": False, "align": "left"},
         "invoice_no": {"xy": (86.0, 16.0), "size": 1.55, "bold": True,  "align": "right"},
-        # Billing Date row (second header row)
-        "bill_date":  {"xy": (16.0, 22.9), "size": 1.45, "bold": False, "align": "left"},
-        "days":       {"xy": (41.5, 22.9), "size": 1.45, "bold": False, "align": "left"},
-        "client":     {"xy": (86.0, 22.8), "size": 1.85, "bold": True,  "align": "right"},
+        # Second header row
+        "bill_date":  {"xy": (16.6, 23.2), "size": 1.45, "bold": False, "align": "left"},
+        "days":       {"xy": (42.0, 23.2), "size": 1.45, "bold": False, "align": "left"},
+        "client":     {"xy": (86.4, 23.2), "size": 1.85, "bold": True,  "align": "right"},
     },
+    # Table body
     "table": {
-        "top_y": 30.8,     # first line item row
-        "row_gap": 5.4,    # vertical gap per row
+        # One row lower + tiny left nudge for desc
+        "top_y": 31.6,     # lowered
+        "row_gap": 5.4,
         "cols": {
-            "desc":  {"x": 8.0,  "w": 55.0, "align": "left"},
-            "qty":   {"x": 63.8, "w": 8.4,  "align": "right"},
-            "rate":  {"x": 74.8, "w": 8.4,  "align": "right"},
-            "price": {"x": 86.3, "w": 8.4,  "align": "right"},
+            "desc":  {"x": 7.6,  "w": 55.0, "align": "left"},   # a little left
+            "qty":   {"x": 61.0, "w": 8.4,  "align": "right"},  # ~2 cells left
+            "rate":  {"x": 73.8, "w": 8.4,  "align": "right"},  # ~1 cell left
+            "price": {"x": 86.0, "w": 8.4,  "align": "right"},
         },
         "font_size_desc": 1.70,
         "font_size_num":  1.70,
         "bold_desc": False
     },
+    # Move GST/TOTAL up ~two rows
     "totals": {
-        "gst_label":   {"xy": (74.8, 75.5), "size": 1.9, "bold": True, "align": "left"},
-        "gst_value":   {"xy": (86.3, 75.5), "size": 1.9, "bold": True, "align": "right"},
-        "total_label": {"xy": (74.8, 83.8), "size": 2.2, "bold": True, "align": "left"},
-        "total_value": {"xy": (86.3, 83.8), "size": 2.2, "bold": True, "align": "right"},
+        "gst_label":   {"xy": (74.8, 72.0), "size": 1.9, "bold": True, "align": "left"},
+        "gst_value":   {"xy": (86.3, 72.0), "size": 1.9, "bold": True, "align": "right"},
+        "total_label": {"xy": (74.8, 80.2), "size": 2.2, "bold": True, "align": "left"},
+        "total_value": {"xy": (86.3, 80.2), "size": 2.2, "bold": True, "align": "right"},
     }
 }
 
@@ -374,7 +380,7 @@ def try_load_template() -> Optional[Image.Image]:
 
 def render_invoice_image(template: Image.Image, fields: Dict[str, str], rows: List[Dict[str, str]]) -> Image.Image:
     """
-    fields keys expected:
+    fields keys:
       'dur_start','dur_end','invoice_no','bill_date','days','client',
       'gst_label','gst_value','total_label','total_value'
     rows: list of dicts with 'desc','qty','rate','price'
@@ -436,7 +442,7 @@ st.markdown("<h2 style='margin-bottom:0'>Friska Wellness — Billing System</h2>
 session = get_service_account_session()
 spid = get_spreadsheet_id(SHEET_URL)
 
-# ---------- Init session state (no widget-key conflicts) ----------
+# ---------- Init session state ----------
 boot_defaults = {
     "fetched": False,
     "client": "",
@@ -596,14 +602,14 @@ with mid_col:
                     st.error(f"Failed to save: {e}")
         st.info(f"Per-day delivery (learned): ₹{st.session_state['delivery_per_day']:.2f}")
 
-        # ===== Invoice mid buttons + full-width preview =====
+        # ===== Invoice =====
         st.markdown("---")
         st.markdown("### Invoice")
         colp, cold = st.columns(2)
         do_preview = colp.button("🖼️ Generate Preview", use_container_width=True, key="btn_preview")
         do_pdf     = cold.button("⬇️ Download PDF", use_container_width=True, key="btn_pdf")
 
-        # Build invoice rows based on RIGHT admin + LEFT prices
+        # Build invoice rows (now includes Delivery)
         price_meal = settings["price_high_protein"] if st.session_state.get("admin_plan","Nutri")=="High Protein" else settings["price_nutri"]
         lines_for_preview = []
 
@@ -620,17 +626,23 @@ with mid_col:
             return price
 
         food_subtotal = 0
-        food_subtotal += add_line("Meal Plan", st.session_state.get("q_meals", 26), price_meal)
-        food_subtotal += add_line("Seafood add-on", st.session_state.get("q_sea", 0), settings["price_seafood_addon"])
-        food_subtotal += add_line("Breakfast", st.session_state.get("q_brk", 0), settings["price_breakfast"])
-        food_subtotal += add_line("Juice", st.session_state.get("q_juice", 0), settings["price_juice"])
-        food_subtotal += add_line("Snack", st.session_state.get("q_snack", 0), settings["price_snack"])
+        food_subtotal += add_line("Meal Plan",      st.session_state.get("q_meals", 26), price_meal)
+        food_subtotal += add_line("Seafood add-on", st.session_state.get("q_sea", 0),    settings["price_seafood_addon"])
+        food_subtotal += add_line("Breakfast",      st.session_state.get("q_brk", 0),    settings["price_breakfast"])
+        food_subtotal += add_line("Juice",          st.session_state.get("q_juice", 0),  settings["price_juice"])
+        food_subtotal += add_line("Snack",          st.session_state.get("q_snack", 0),  settings["price_snack"])
 
         gst_amount = round(food_subtotal * (settings["gst_percent"]/100.0)) if settings["gst_percent"] else 0
-        delivery_amount = round(st.session_state.get("q_delivdays", 0) * st.session_state.get("rate_deliv", 0.0))
+        # Delivery line (separate, no GST)
+        delivery_days = int(st.session_state.get("q_delivdays", 26) or 0)
+        delivery_rate = float(st.session_state.get("rate_deliv", 0.0) or 0.0)
+        delivery_amount = round(delivery_days * delivery_rate)
+        if delivery_days and delivery_rate:
+            add_line("Delivery", delivery_days, delivery_rate)
+
         grand_total = round(food_subtotal + gst_amount + delivery_amount)
 
-        # Build header strings for the template’s exact boxes
+        # Header strings for the template’s exact boxes
         dur_start_text = (st.session_state.get("adm_start") or "").strip()
         dur_end_text   = (st.session_state.get("adm_end") or "").strip()
         client_label   = (st.session_state.get("adm_client_lbl") or st.session_state.get("client","")).strip()
@@ -654,7 +666,7 @@ with mid_col:
         if (do_preview or do_pdf):
             template_img = try_load_template()
             if not template_img:
-                st.error("Template PNG not found. Place `invoice_template_a4.png` (or `invoice_template.png`) in the app folder.")
+                st.error("Template PNG not found. Place `invoice_template_a4.png` in the app folder (or rename in code).")
             else:
                 visible_rows = [r for r in lines_for_preview if (r["qty"] or r["price"])]
                 if not visible_rows:
