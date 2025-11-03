@@ -3,10 +3,16 @@
 
 # =========================================================
 # Friska Billing Web App — Streamlit Cloud + Service Account
-# - Debug panel to diagnose tab names, date headers, client rows
 # - Counts meals/snacks/juices/breakfast/seafood + paused
-# - Column G = delivery price (override used for now)
+# - Delivery from sheet (col G) with custom rules per client:
+#     * If ALL Type (col C) are identical -> charge ONCE per service day
+#       (per-day price = MAX delivery price across the client's rows)
+#     * If any Type mentions "morning delivery" or "evening delivery"
+#       AND Types are NOT all identical -> SUM delivery prices across rows
+#     * If all Types are "evening delivery" (or all "morning delivery")
+#       -> identical -> charge ONCE
 # - Date blocks from H, 6 columns per date
+# - Debug panel shows delivery mode decisions by month
 # =========================================================
 
 import streamlit as st
@@ -19,9 +25,12 @@ from google.auth.transport.requests import AuthorizedSession
 SHEET_URL = "https://docs.google.com/spreadsheets/d/1CsT6_oYsFjgQQ73pt1Bl1cuXuzKY8JnOTB3E4bDkTiA/edit?usp=sharing"
 
 # layout constants
-DELIVERY_PRICE_COL_IDX = 6   # G
-START_DATA_COL_IDX     = 7   # H
-COLUMNS_PER_BLOCK      = 6   # Meal1, Meal2, Snack, J1, J2, Breakfast
+COL_A = 0
+COL_B_CLIENT = 1
+COL_C_TYPE = 2
+COL_G_DELIVERY = 6          # G (0-based indexing)
+START_DATA_COL_IDX = 7      # H
+COLUMNS_PER_BLOCK  = 6      # Meal1, Meal2, Snack, J1, J2, Breakfast
 
 SCOPES = [
     "https://www.googleapis.com/auth/drive.readonly",
@@ -33,7 +42,9 @@ DEFAULT_SETTINGS = {
     "price_nutri": 180.0,
     "price_high_protein": 200.0,
     "price_seafood_addon": 80.0,
-    "price_delivery_override": 80.0,
+    "price_juice": 0.0,
+    "price_snack": 0.0,
+    "price_breakfast": 0.0,
     "gst_percent": 5.0,
 }
 
@@ -144,12 +155,71 @@ def month_span_inclusive(a: date, b: date) -> List[Tuple[int, int]]:
             m += 1
     return out
 
-# --------- Counting logic (with diagnostics) ----------
+def parse_float(x) -> float:
+    try:
+        if x is None: return 0.0
+        s = str(x).strip()
+        if not s: return 0.0
+        # keep only digits and dot/minus
+        num = re.sub(r"[^0-9\.\-]", "", s)
+        return float(num) if num else 0.0
+    except:
+        return 0.0
+
+# --------- Delivery pricing logic for client's rows on a given tab ----------
+def compute_delivery_per_day_for_rows(rows: List[int], data: List[List[str]]) -> Tuple[float, str, List[Dict[str, str]]]:
+    """
+    Returns (per_day_price, mode, details)
+    mode ∈ {"single_identical", "sum_shifts", "single_mismatch", "none"}
+    details: list of dicts with row, type, price for debugging
+    """
+    if not rows:
+        return 0.0, "none", []
+
+    types = []
+    prices = []
+    details = []
+    for r in rows:
+        row = data[r] if r < len(data) else []
+        typ = str(row[COL_C_TYPE]).strip() if len(row) > COL_C_TYPE else ""
+        price = parse_float(row[COL_G_DELIVERY] if len(row) > COL_G_DELIVERY else "")
+        types.append(typ)
+        prices.append(price)
+        details.append({"row": str(r+1), "type": typ, "price": f"{price:.2f}"})
+
+    # Normalize types for comparison
+    norm_types = [norm_name(t) for t in types]
+    nonempty_norm_types = [t for t in norm_types if t != ""]
+    all_identical = len(set(nonempty_norm_types)) <= 1  # treat blank-only as identical too
+
+    has_shift_word = any(("morning delivery" in t) or ("evening delivery" in t) for t in norm_types)
+
+    if all_identical:
+        per_day = max(prices) if prices else 0.0
+        return per_day, "single_identical", details
+
+    if has_shift_word:
+        per_day = sum(prices) if prices else 0.0
+        return per_day, "sum_shifts", details
+
+    # Types differ but no explicit morning/evening flagged -> charge once (take max)
+    per_day = max(prices) if prices else 0.0
+    return per_day, "single_mismatch", details
+
+# --------- Counting logic (with diagnostics, now includes delivery) ----------
 def count_usage(session: AuthorizedSession, spid: str, start: date, end: date, client_name: str, debug: bool=False):
     client_key = norm_name(client_name)
     totals = dict(meal1=0, meal2=0, snack=0, j1=0, j2=0, brk=0, seafood=0, paused=0)
-    delivery_days = 0
-    diag = {"months": [], "tabs_checked": [], "dates_seen": {}, "client_found_rows": {}}
+    grand_delivery_days = 0
+    delivery_amount_total = 0.0
+
+    diag = {
+        "months": [],
+        "tabs_checked": [],
+        "dates_seen": {},
+        "client_found_rows": {},
+        "delivery_by_month": []  # list of dicts: month, mode, per_day, service_days, rows
+    }
 
     for (yy, mm) in month_span_inclusive(start, end):
         month_name = calendar.month_name[mm]
@@ -167,10 +237,11 @@ def count_usage(session: AuthorizedSession, spid: str, start: date, end: date, c
         # map client rows
         lut = {}
         for r, row in enumerate(data):
-            name = norm_name(row[1]) if len(row) > 1 else ""
+            name = norm_name(row[COL_B_CLIENT]) if len(row) > COL_B_CLIENT else ""
             if name:
                 lut.setdefault(name, []).append(r)
-        diag["client_found_rows"][sheet_title] = lut.get(client_key, [])
+        client_rows = lut.get(client_key, [])
+        diag["client_found_rows"][sheet_title] = client_rows
 
         # dates on row 1
         row1 = data[0] if data else []
@@ -184,7 +255,6 @@ def count_usage(session: AuthorizedSession, spid: str, start: date, end: date, c
                 if date_to_block and (c >= len(row1) or not str(row1[c]).strip()):
                     break
             c += COLUMNS_PER_BLOCK
-        # store sample of parsed dates
         diag["dates_seen"][sheet_title] = [d.strftime("%d-%b-%y") for d in sorted(date_to_block.keys())[:10]]
 
         # iterate this month's slice
@@ -193,9 +263,14 @@ def count_usage(session: AuthorizedSession, spid: str, start: date, end: date, c
         cur = max(first_day, start)
         stop = min(last_day, end)
 
+        # determine delivery per-day price & mode for this tab (based on client's rows)
+        per_day_delivery, delivery_mode, delivery_details = compute_delivery_per_day_for_rows(client_rows, data)
+
+        service_days_this_month = 0
+
         while cur <= stop:
             block = date_to_block.get(cur)
-            rows = lut.get(client_key, [])
+            rows = client_rows
             if block is None or not rows:
                 cur += timedelta(days=1); continue
 
@@ -219,7 +294,7 @@ def count_usage(session: AuthorizedSession, spid: str, start: date, end: date, c
             if (m1+m2+sn+j1+j2+bk) == 0:
                 totals["paused"] += 1
             else:
-                delivery_days += 1
+                service_days_this_month += 1
 
             totals["meal1"] += m1
             totals["meal2"] += m2
@@ -231,9 +306,21 @@ def count_usage(session: AuthorizedSession, spid: str, start: date, end: date, c
 
             cur += timedelta(days=1)
 
+        # accumulate delivery
+        delivery_amount_total += per_day_delivery * service_days_this_month
+        grand_delivery_days   += service_days_this_month
+        diag["delivery_by_month"].append({
+            "month": month_name,
+            "tab": sheet_title,
+            "mode": delivery_mode,
+            "per_day": per_day_delivery,
+            "service_days": service_days_this_month,
+            "row_details": delivery_details
+        })
+
     totals["meals_total"]  = totals["meal1"] + totals["meal2"]
     totals["juices_total"] = totals["j1"] + totals["j2"]
-    return totals, delivery_days, diag
+    return totals, grand_delivery_days, delivery_amount_total, diag
 
 # ---------------- UI ----------------
 st.set_page_config(page_title="Friska Billing", page_icon="💼", layout="centered")
@@ -249,8 +336,15 @@ with st.sidebar:
     settings["price_nutri"] = c1.number_input("Nutri (₹)", value=float(settings["price_nutri"]), step=5.0)
     settings["price_high_protein"] = c2.number_input("High Protein (₹)", value=float(settings["price_high_protein"]), step=5.0)
     settings["price_seafood_addon"] = st.number_input("Seafood add-on (₹)", value=float(settings["price_seafood_addon"]), step=5.0)
-    settings["gst_percent"] = st.number_input("GST % (food only)", value=float(settings["gst_percent"]), step=1.0, min_value=0.0)
-    settings["price_delivery_override"] = st.number_input("Delivery (₹/service day)", value=float(settings["price_delivery_override"]), step=5.0)
+
+    st.markdown("**Add-on prices**")
+    c3, c4, c5 = st.columns(3)
+    settings["price_juice"] = c3.number_input("Juice (₹)", value=float(settings["price_juice"]), step=5.0)
+    settings["price_snack"] = c4.number_input("Snack (₹)", value=float(settings["price_snack"]), step=5.0)
+    settings["price_breakfast"] = c5.number_input("Breakfast (₹)", value=float(settings["price_breakfast"]), step=5.0)
+
+    settings["gst_percent"] = st.number_input("GST % (meals + seafood only)", value=float(settings["gst_percent"]), step=1.0, min_value=0.0)
+
     debug = st.checkbox("Show debug details")
     if st.button("💾 Save settings", use_container_width=True):
         save_settings(settings)
@@ -269,18 +363,17 @@ if st.button("📊 Fetch Usage & Draft Bill", use_container_width=True):
         st.error("End date must be on/after start date.")
     else:
         try:
-            totals, delivery_days, diag = count_usage(session, spid, start, end, client, debug=debug)
+            totals, delivery_days, delivery_amount, diag = count_usage(session, spid, start, end, client, debug=debug)
         except Exception as e:
             st.error(f"Processing failed: {e}")
             st.stop()
 
-        # If nothing found, give helpful hints
         if sum([totals[k] for k in ["meals_total","snack","juices_total","brk"]]) == 0 and delivery_days == 0:
             st.warning(
                 "No usage found for this client and date range.\n\n"
                 "Tips:\n"
-                "• Check the exact spelling of the client (column B)\n"
-                "• Make sure the tab is named like 'clientlist November' or 'clientlist Nov'\n"
+                "• Check exact spelling of the client (column B)\n"
+                "• Ensure tab is 'clientlist <Month>' or 'clientlist <Mon>'\n"
                 "• Row 1 must contain the date in H, then every 6 columns (H, N, T, …)"
             )
 
@@ -299,29 +392,41 @@ if st.button("📊 Fetch Usage & Draft Bill", use_container_width=True):
             "Service (delivery) days": delivery_days,
         })
 
-        price_meal     = settings["price_nutri"]      # we’ll auto-detect later
-        price_seafood  = settings["price_seafood_addon"]
-        gst_pct        = settings["gst_percent"]
-        delivery_price = settings["price_delivery_override"]
+        # Billing numbers
+        price_meal      = settings["price_nutri"]          # we'll auto-detect plan later
+        price_seafood   = settings["price_seafood_addon"]
+        price_juice     = settings["price_juice"]
+        price_snack     = settings["price_snack"]
+        price_breakfast = settings["price_breakfast"]
+        gst_pct         = settings["gst_percent"]
 
-        food_amount     = totals["meals_total"] * price_meal
-        seafood_amount  = totals["seafood"] * price_seafood
-        taxable         = food_amount + seafood_amount
-        gst_amt         = round(taxable * (gst_pct/100.0), 2) if gst_pct else 0.0
-        delivery_amount = delivery_days * delivery_price
-        grand_total     = round(taxable + gst_amt + delivery_amount)
+        food_amount      = totals["meals_total"]   * price_meal
+        seafood_amount   = totals["seafood"]       * price_seafood
+        juices_amount    = totals["juices_total"]  * price_juice
+        snacks_amount    = totals["snack"]         * price_snack
+        breakfast_amount = totals["brk"]           * price_breakfast
+
+        taxable   = food_amount + seafood_amount              # GST only on meals + seafood (for now)
+        gst_amt   = round(taxable * (gst_pct/100.0), 2) if gst_pct else 0.0
+
+        grand_total = round(taxable + gst_amt + juices_amount + snacks_amount + breakfast_amount + delivery_amount)
 
         st.subheader("Draft Bill")
         st.write({
-            "Food base": f"{totals['meals_total']} × ₹{price_meal} = ₹{food_amount:.2f}",
-            "Seafood add-on": f"{totals['seafood']} × ₹{price_seafood} = ₹{seafood_amount:.2f}",
-            "GST": f"₹{gst_amt:.2f} (@ {gst_pct}%)",
-            "Delivery": f"{delivery_days} × ₹{delivery_price} = ₹{delivery_amount:.2f}",
-            "TOTAL": f"₹ {grand_total}",
+            "Food base":       f"{totals['meals_total']} × ₹{price_meal} = ₹{food_amount:.2f}",
+            "Seafood add-on":  f"{totals['seafood']} × ₹{price_seafood} = ₹{seafood_amount:.2f}",
+            "GST":             f"₹{gst_amt:.2f} (@ {gst_pct}%)",
+            "Juices":          f"{totals['juices_total']} × ₹{price_juice} = ₹{juices_amount:.2f}",
+            "Snacks":          f"{totals['snack']} × ₹{price_snack} = ₹{snacks_amount:.2f}",
+            "Breakfast":       f"{totals['brk']} × ₹{price_breakfast} = ₹{breakfast_amount:.2f}",
+            "Delivery (from sheet)": f"₹{delivery_amount:.2f}",
+            "TOTAL":           f"₹ {grand_total}",
         })
-        st.success("Draft ready. (PDF button comes next.)")
+        st.success("Draft ready with delivery logic applied.")
 
         if debug:
             st.divider()
-            st.subheader("🔎 Debug details")
-            st.write(diag)
+            st.subheader("🔎 Delivery decision by month")
+            st.write(diag.get("delivery_by_month", []))
+            st.subheader("🔎 Other debug")
+            st.write({k: v for k, v in diag.items() if k != "delivery_by_month"})
