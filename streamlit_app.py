@@ -4,13 +4,7 @@
 # =========================================================
 # Friska Billing Web App — Streamlit Cloud + Service Account
 # - Counts meals/snacks/juices/breakfast/seafood + paused
-# - Delivery from sheet (col G) with custom rules per client:
-#     * If ALL Type (col C) are identical -> charge ONCE per service day
-#       (per-day price = MAX delivery price across the client's rows)
-#     * If any Type mentions "morning delivery" or "evening delivery"
-#       AND Types are NOT all identical -> SUM delivery prices across rows
-#     * If all Types are "evening delivery" (or all "morning delivery")
-#       -> identical -> charge ONCE
+# - Delivery from sheet (col G) with your custom rules
 # - Date blocks from H, 6 columns per date
 # - Debug panel shows delivery mode decisions by month
 # =========================================================
@@ -160,25 +154,25 @@ def parse_float(x) -> float:
         if x is None: return 0.0
         s = str(x).strip()
         if not s: return 0.0
-        # keep only digits and dot/minus
         num = re.sub(r"[^0-9\.\-]", "", s)
         return float(num) if num else 0.0
     except:
         return 0.0
 
-# --------- Delivery pricing logic for client's rows on a given tab ----------
+# --------- Delivery pricing logic (FIXED) ----------
 def compute_delivery_per_day_for_rows(rows: List[int], data: List[List[str]]) -> Tuple[float, str, List[Dict[str, str]]]:
     """
     Returns (per_day_price, mode, details)
     mode ∈ {"single_identical", "sum_shifts", "single_mismatch", "none"}
-    details: list of dicts with row, type, price for debugging
+    Rules:
+      - If ALL row "Type" (col C) are exactly the same -> charge ONCE (per-day = max price).
+      - Else if ANY row mentions morning/evening AND not all same shift -> SUM prices.
+      - Else (types differ but no morning/evening) -> charge ONCE (per-day = max price).
     """
     if not rows:
         return 0.0, "none", []
 
-    types = []
-    prices = []
-    details = []
+    types, prices, details = [], [], []
     for r in rows:
         row = data[r] if r < len(data) else []
         typ = str(row[COL_C_TYPE]).strip() if len(row) > COL_C_TYPE else ""
@@ -187,26 +181,37 @@ def compute_delivery_per_day_for_rows(rows: List[int], data: List[List[str]]) ->
         prices.append(price)
         details.append({"row": str(r+1), "type": typ, "price": f"{price:.2f}"})
 
-    # Normalize types for comparison
     norm_types = [norm_name(t) for t in types]
-    nonempty_norm_types = [t for t in norm_types if t != ""]
-    all_identical = len(set(nonempty_norm_types)) <= 1  # treat blank-only as identical too
 
-    has_shift_word = any(("morning delivery" in t) or ("evening delivery" in t) for t in norm_types)
+    def all_equal(vals: List[str]) -> bool:
+        return len(vals) > 0 and len(set(vals)) == 1
 
-    if all_identical:
+    # Detect shifts
+    has_morning = any("morning" in t for t in norm_types)
+    has_evening = any("evening" in t for t in norm_types)
+
+    if all_equal(norm_types):
+        # all identical (even if all blank) -> once
         per_day = max(prices) if prices else 0.0
         return per_day, "single_identical", details
 
-    if has_shift_word:
+    if has_morning or has_evening:
+        # if all rows same shift -> once, else sum
+        if all(t == "morning delivery" for t in norm_types):
+            per_day = max(prices) if prices else 0.0
+            return per_day, "single_identical", details
+        if all(t == "evening delivery" for t in norm_types):
+            per_day = max(prices) if prices else 0.0
+            return per_day, "single_identical", details
+        # Mixed (morning/evening/blank/others) -> sum
         per_day = sum(prices) if prices else 0.0
         return per_day, "sum_shifts", details
 
-    # Types differ but no explicit morning/evening flagged -> charge once (take max)
+    # Types differ but no explicit shift words -> once
     per_day = max(prices) if prices else 0.0
     return per_day, "single_mismatch", details
 
-# --------- Counting logic (with diagnostics, now includes delivery) ----------
+# --------- Counting logic (with diagnostics, includes delivery) ----------
 def count_usage(session: AuthorizedSession, spid: str, start: date, end: date, client_name: str, debug: bool=False):
     client_key = norm_name(client_name)
     totals = dict(meal1=0, meal2=0, snack=0, j1=0, j2=0, brk=0, seafood=0, paused=0)
@@ -218,7 +223,7 @@ def count_usage(session: AuthorizedSession, spid: str, start: date, end: date, c
         "tabs_checked": [],
         "dates_seen": {},
         "client_found_rows": {},
-        "delivery_by_month": []  # list of dicts: month, mode, per_day, service_days, rows
+        "delivery_by_month": []
     }
 
     for (yy, mm) in month_span_inclusive(start, end):
@@ -263,7 +268,7 @@ def count_usage(session: AuthorizedSession, spid: str, start: date, end: date, c
         cur = max(first_day, start)
         stop = min(last_day, end)
 
-        # determine delivery per-day price & mode for this tab (based on client's rows)
+        # delivery per-day price & mode for this tab
         per_day_delivery, delivery_mode, delivery_details = compute_delivery_per_day_for_rows(client_rows, data)
 
         service_days_this_month = 0
@@ -422,7 +427,7 @@ if st.button("📊 Fetch Usage & Draft Bill", use_container_width=True):
             "Delivery (from sheet)": f"₹{delivery_amount:.2f}",
             "TOTAL":           f"₹ {grand_total}",
         })
-        st.success("Draft ready with delivery logic applied.")
+        st.success("Draft ready with corrected delivery logic.")
 
         if debug:
             st.divider()
