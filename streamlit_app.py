@@ -246,12 +246,14 @@ def compute_delivery_per_day_for_rows(
 
 def count_usage(session: AuthorizedSession, spid: str, start: date, end: date, client_name: str):
     client_key = norm_name(client_name)
+
     totals = dict(meal1=0, meal2=0, snack=0, j1=0, j2=0, brk=0, seafood=0)
-    total_days = 0; active_days = 0
+    total_days = 0
+    active_days = 0
     paused_dates: List[date] = []
     last_per_day_delivery = 0.0
 
-        for (yy, mm) in month_span_inclusive(start, end):
+    for (yy, mm) in month_span_inclusive(start, end):
         month_name = calendar.month_name[mm]
         sheet_title, _ = get_clientlist_sheet_title(session, spid, month_name)
         if not sheet_title:
@@ -261,6 +263,7 @@ def count_usage(session: AuthorizedSession, spid: str, start: date, end: date, c
         if not data:
             continue
 
+        # Map rows by client
         rows_by_client = {}
         for r, row in enumerate(data):
             nm = norm_name(row[COL_B_CLIENT]) if len(row) > COL_B_CLIENT else ""
@@ -268,18 +271,20 @@ def count_usage(session: AuthorizedSession, spid: str, start: date, end: date, c
                 rows_by_client.setdefault(nm, []).append(r)
 
         client_rows = rows_by_client.get(client_key, [])
+        if not client_rows:
+            continue
 
-        row1 = data[0]
+        header_row = data[0]
 
         # 🔍 Detect structure dynamically
-        first_date_col, delivery_col = detect_clientlist_structure(row1)
+        first_date_col, delivery_col = detect_clientlist_structure(header_row)
 
         date_to_block = {}
         header_dates = []
 
         c = first_date_col
-        while c < len(row1):
-            dt = to_dt(row1[c])
+        while c < len(header_row):
+            dt = to_dt(header_row[c])
             if not dt:
                 break
 
@@ -290,13 +295,12 @@ def count_usage(session: AuthorizedSession, spid: str, start: date, end: date, c
 
             c += COLUMNS_PER_BLOCK
 
-        # 🚚 Delivery calculation (dynamic column)
+        # 🚚 Delivery calculation
         per_day_delivery, _, _ = compute_delivery_per_day_for_rows(
             client_rows,
             data,
             delivery_col
         )
-
         if per_day_delivery:
             last_per_day_delivery = per_day_delivery
 
@@ -304,7 +308,7 @@ def count_usage(session: AuthorizedSession, spid: str, start: date, end: date, c
 
         for d in header_dates:
             block = date_to_block.get(d)
-            if block is None or not client_rows:
+            if block is None:
                 continue
 
             m1 = m2 = sn = j1 = j2 = bk = sf = 0
@@ -353,9 +357,10 @@ def count_usage(session: AuthorizedSession, spid: str, start: date, end: date, c
         total_days += len(header_dates)
         active_days += service_days_this_month
 
-    totals["meals_total"]  = totals["meal1"] + totals["meal2"]
+    totals["meals_total"] = totals["meal1"] + totals["meal2"]
     totals["juices_total"] = totals["j1"] + totals["j2"]
     paused_days = max(0, total_days - active_days)
+
     return totals, active_days, paused_days, total_days, paused_dates, last_per_day_delivery
 
 def next_service_calendar_dates(after_day: date, needed: int) -> List[date]:
