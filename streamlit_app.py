@@ -251,20 +251,25 @@ def count_usage(session: AuthorizedSession, spid: str, start: date, end: date, c
     paused_dates: List[date] = []
     last_per_day_delivery = 0.0
 
-    for (yy, mm) in month_span_inclusive(start, end):
+        for (yy, mm) in month_span_inclusive(start, end):
         month_name = calendar.month_name[mm]
         sheet_title, _ = get_clientlist_sheet_title(session, spid, month_name)
-        if not sheet_title: continue
+        if not sheet_title:
+            continue
+
         data = fetch_values(session, spid, f"{sheet_title}!A1:ZZ2000")
-        if not data: continue
+        if not data:
+            continue
 
         rows_by_client = {}
         for r, row in enumerate(data):
             nm = norm_name(row[COL_B_CLIENT]) if len(row) > COL_B_CLIENT else ""
-            if nm: rows_by_client.setdefault(nm, []).append(r)
+            if nm:
+                rows_by_client.setdefault(nm, []).append(r)
+
         client_rows = rows_by_client.get(client_key, [])
 
-                row1 = data[0] if data else []
+        row1 = data[0]
 
         # 🔍 Detect structure dynamically
         first_date_col, delivery_col = detect_clientlist_structure(row1)
@@ -285,7 +290,7 @@ def count_usage(session: AuthorizedSession, spid: str, start: date, end: date, c
 
             c += COLUMNS_PER_BLOCK
 
-        # 🚚 Compute delivery per day (dynamic column)
+        # 🚚 Delivery calculation (dynamic column)
         per_day_delivery, _, _ = compute_delivery_per_day_for_rows(
             client_rows,
             data,
@@ -296,6 +301,7 @@ def count_usage(session: AuthorizedSession, spid: str, start: date, end: date, c
             last_per_day_delivery = per_day_delivery
 
         service_days_this_month = 0
+
         for d in header_dates:
             block = date_to_block.get(d)
             if block is None or not client_rows:
