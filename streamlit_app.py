@@ -16,8 +16,6 @@ BILLING_TAB = "BillingCycle"   # headers: Client | Start | End
 # clientlist sheet structure
 COL_B_CLIENT = 1
 COL_C_TYPE   = 2
-COL_G_DELIVERY = 6
-START_DATA_COL_IDX = 7   # H
 COLUMNS_PER_BLOCK  = 6   # Meal1, Meal2, Snack, J1, J2, Breakfast
 
 SCOPES = [
@@ -139,6 +137,26 @@ def to_dt(v) -> Optional[datetime]:
 
 def dtstr(d: date) -> str:
     return d.strftime("%d-%b-%Y")
+def detect_clientlist_structure(header_row: List):
+    """
+    Dynamically detects:
+    - first date column (start of meal blocks)
+    - delivery column (by header text)
+    """
+    first_date_col = None
+    delivery_col = None
+
+    for idx, cell in enumerate(header_row):
+        if first_date_col is None and to_dt(cell):
+            first_date_col = idx
+
+        if isinstance(cell, str) and "delivery" in cell.lower():
+            delivery_col = idx
+
+    if first_date_col is None:
+        raise ValueError("Could not detect date columns in clientlist header.")
+
+    return first_date_col, delivery_col
 
 def norm_name(s: str) -> str:
     return re.sub(r"\s+", " ", (s or "").strip()).lower()
@@ -197,14 +215,23 @@ def parse_float(x) -> float:
         return float(num) if num else 0.0
     except: return 0.0
 
-def compute_delivery_per_day_for_rows(rows: List[int], data: List[List[str]]):
+def compute_delivery_per_day_for_rows(
+    rows: List[int],
+    data: List[List[str]],
+    delivery_col: Optional[int]
+):
+
     if not rows:
         return 0.0, "none", []
     types, prices = [], []
     for r in rows:
         row = data[r] if r < len(data) else []
         typ = str(row[COL_C_TYPE]).strip() if len(row) > COL_C_TYPE else ""
-        price = parse_float(row[COL_G_DELIVERY] if len(row) > COL_G_DELIVERY else "")
+        price = parse_float(
+    row[delivery_col]
+    if delivery_col is not None and len(row) > delivery_col
+    else ""
+)
         types.append(norm_name(typ)); prices.append(price)
     has_morning = any("morning" in t for t in types)
     has_evening = any("evening" in t for t in types)
@@ -237,43 +264,85 @@ def count_usage(session: AuthorizedSession, spid: str, start: date, end: date, c
             if nm: rows_by_client.setdefault(nm, []).append(r)
         client_rows = rows_by_client.get(client_key, [])
 
-        row1 = data[0] if data else []
-        date_to_block = {}; header_dates = []
-        c = START_DATA_COL_IDX
+                row1 = data[0] if data else []
+
+        # 🔍 Detect structure dynamically
+        first_date_col, delivery_col = detect_clientlist_structure(row1)
+
+        date_to_block = {}
+        header_dates = []
+
+        c = first_date_col
         while c < len(row1):
-            dt = to_dt(row1[c]) if c < len(row1) else None
-            if dt:
-                d = dt.date()
-                date_to_block[d] = c
-                if start <= d <= end:
-                    header_dates.append(d)
-            else:
-                if date_to_block and (c >= len(row1) or not str(row1[c]).strip()): break
+            dt = to_dt(row1[c])
+            if not dt:
+                break
+
+            d = dt.date()
+            date_to_block[d] = c
+            if start <= d <= end:
+                header_dates.append(d)
+
             c += COLUMNS_PER_BLOCK
 
-        per_day_delivery, _, _ = compute_delivery_per_day_for_rows(client_rows, data)
-        if per_day_delivery: last_per_day_delivery = per_day_delivery
+        # 🚚 Compute delivery per day (dynamic column)
+        per_day_delivery, _, _ = compute_delivery_per_day_for_rows(
+            client_rows,
+            data,
+            delivery_col
+        )
+
+        if per_day_delivery:
+            last_per_day_delivery = per_day_delivery
 
         service_days_this_month = 0
         for d in header_dates:
             block = date_to_block.get(d)
-            if block is None or not client_rows: continue
-            m1=m2=sn=j1=j2=bk=sf=0
+            if block is None or not client_rows:
+                continue
+
+            m1 = m2 = sn = j1 = j2 = bk = sf = 0
+
             for r in client_rows:
                 row = data[r]
-                def cell(ci): return row[ci] if ci < len(row) else ""
-                v1 = str(cell(block)).strip(); v2 = str(cell(block+1)).strip()
-                if v1: m1 += 1;  sf += 1 if norm_name(v1)=="seafood 1" else 0
-                if v2: m2 += 1;  sf += 1 if norm_name(v2)=="seafood 2" else 0
-                if str(cell(block+2)).strip(): sn += 1
-                if str(cell(block+3)).strip(): j1 += 1
-                if str(cell(block+4)).strip(): j2 += 1
-                if str(cell(block+5)).strip(): bk += 1
-            if (m1+m2+sn+j1+j2+bk) > 0: service_days_this_month += 1
-            else: paused_dates.append(d)
 
-            totals["meal1"]+=m1; totals["meal2"]+=m2; totals["snack"]+=sn
-            totals["j1"]+=j1; totals["j2"]+=j2; totals["brk"]+=bk; totals["seafood"]+=sf
+                def cell(ci):
+                    return row[ci] if ci < len(row) else ""
+
+                v1 = str(cell(block)).strip()
+                v2 = str(cell(block + 1)).strip()
+
+                if v1:
+                    m1 += 1
+                    if norm_name(v1) == "seafood 1":
+                        sf += 1
+
+                if v2:
+                    m2 += 1
+                    if norm_name(v2) == "seafood 2":
+                        sf += 1
+
+                if str(cell(block + 2)).strip():
+                    sn += 1
+                if str(cell(block + 3)).strip():
+                    j1 += 1
+                if str(cell(block + 4)).strip():
+                    j2 += 1
+                if str(cell(block + 5)).strip():
+                    bk += 1
+
+            if (m1 + m2 + sn + j1 + j2 + bk) > 0:
+                service_days_this_month += 1
+            else:
+                paused_dates.append(d)
+
+            totals["meal1"] += m1
+            totals["meal2"] += m2
+            totals["snack"] += sn
+            totals["j1"] += j1
+            totals["j2"] += j2
+            totals["brk"] += bk
+            totals["seafood"] += sf
 
         total_days += len(header_dates)
         active_days += service_days_this_month
