@@ -292,8 +292,6 @@ def count_usage(session: AuthorizedSession, spid: str, start: date, end: date, c
     delivery_rates = []
 
     for row in data:
-        if len(row) < 13:
-            continue
 
         dt = to_dt(row[0])
         if not dt:
@@ -311,12 +309,15 @@ def count_usage(session: AuthorizedSession, spid: str, start: date, end: date, c
             continue
 
         # Meal fields
-        opt1 = str(row[7]).strip()
-        opt2 = str(row[8]).strip()
-        brk  = str(row[9]).strip()
-        snk  = str(row[10]).strip()
-        j1   = str(row[11]).strip()
-        j2   = str(row[12]).strip()
+        def get_cell(idx):
+            return str(row[idx]).strip() if idx < len(row) else ""
+        
+        opt1 = get_cell(7)
+        opt2 = get_cell(8)
+        brk  = get_cell(9)
+        snk  = get_cell(10)
+        j1   = get_cell(11)
+        j2   = get_cell(12)
 
         meal_count_this_row = 0
 
