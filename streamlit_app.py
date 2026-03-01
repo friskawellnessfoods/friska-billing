@@ -526,7 +526,16 @@ with left:
     settings["gst_percent"] = st.number_input("GST % (food only)", value=float(settings["gst_percent"]), step=1.0, min_value=0.0, key="gst")
     if st.button("💾 Save", use_container_width=True, key="save_prices"):
         save_settings(settings); st.success("Saved.")
-
+        
+def next_service_calendar_dates(after_day: date, needed: int) -> List[date]:
+    out: List[date] = []
+    cur = after_day + timedelta(days=1)
+    while len(out) < needed:
+        if cur.weekday() != 6:  # Sunday=6
+            out.append(cur)
+        cur += timedelta(days=1)
+    return out
+    
 def compute_from_range(client_name: str, prev_start: date, prev_end: date):
     totals, active_days, paused_days, total_days, paused_dates, learned_delivery = count_usage(session, spid, prev_start, prev_end, client_name)
     needed_adjust = paused_days
