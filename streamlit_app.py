@@ -118,21 +118,39 @@ WEEKDAY_PREFIX = re.compile(
     re.I
 )
 def to_dt(v) -> Optional[datetime]:
-    if isinstance(v, (int, float)):
-        return datetime(1899, 12, 30) + timedelta(days=float(v))
-    s = str(v or "").strip()
-    if not s: return None
-    s = WEEKDAY_PREFIX.sub("", s)
-    for fmt in ("%d-%b-%y","%d-%b-%Y","%d/%m/%Y","%d/%m/%y","%Y-%m-%d","%d %b %Y","%d %b %y"):
-        try: return datetime.strptime(s, fmt)
-        except: pass
-    m = re.match(r"^\s*(\d{1,2})\s+([A-Za-z]+)\s*$", s)
-    if m:
+    if not v:
+        return None
+
+    # Numeric (Google serial)
+    try:
+        if isinstance(v, (int, float)):
+            return datetime(1899, 12, 30) + timedelta(days=float(v))
+        if str(v).replace(".", "", 1).isdigit():
+            return datetime(1899, 12, 30) + timedelta(days=float(v))
+    except:
+        pass
+
+    s = str(v).strip()
+
+    # Try multiple common formats
+    formats = [
+        "%d-%b-%Y",
+        "%d-%b-%y",
+        "%d-%m-%Y",
+        "%d-%m-%y",
+        "%Y-%m-%d",
+        "%d/%m/%Y",
+        "%d/%m/%y",
+        "%d %b %Y",
+        "%d %b %y",
+    ]
+
+    for fmt in formats:
         try:
-            month = m.group(2).title()
-            y = date.today().year
-            return datetime.strptime(f"{m.group(1)}-{month}-{y}", "%d-%b-%Y")
-        except: return None
+            return datetime.strptime(s, fmt)
+        except:
+            continue
+
     return None
 
 def dtstr(d: date) -> str:
