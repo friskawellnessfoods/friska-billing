@@ -266,33 +266,37 @@ def count_usage(session: AuthorizedSession, spid: str, start: date, end: date, c
     client_key = norm_name(client_name)
 
     totals = dict(meal1=0, meal2=0, snack=0, j1=0, j2=0, brk=0, seafood=0)
-    total_days = 0
     active_days_set = set()
     paused_dates: List[date] = []
     last_per_day_delivery = 0.0
 
-    # Fetch full Orders_Output sheet
-    data = fetch_values(session, spid, "Orders_Output!A2:M20000")
-    st.write("First 5 rows raw:", data[:5])
-    st.write("Total rows fetched:", len(data))
+    # Fetch full Orders_Output sheet (no row limit)
+    data = fetch_values(session, spid, "Orders_Output!A2:M")
+
     if not data:
         return totals, 0, 0, 0, [], 0.0
 
-    # Build full date range (inclusive)
+    # Build full billing range excluding Sundays
+    all_service_dates = []
     cur = start
-    all_dates = []
     while cur <= end:
-        if cur.weekday() != 6:  # Exclude Sundays
-            all_dates.append(cur)
+        if cur.weekday() != 6:  # Sunday = 6
+            all_service_dates.append(cur)
         cur += timedelta(days=1)
 
-    total_days = len(all_dates)
+    total_days = len(all_service_dates)
 
-    # Track delivery per day from Meal Type column
     delivery_rates = []
 
     for row in data:
 
+        # ---- SAFETY GUARDS ----
+        if not row:
+            continue
+        if len(row) < 2:
+            continue
+
+        # ---- DATE PARSE ----
         dt = to_dt(row[0])
         if not dt:
             continue
@@ -305,13 +309,14 @@ def count_usage(session: AuthorizedSession, spid: str, start: date, end: date, c
         if row_date.weekday() == 6:
             continue
 
+        # ---- CLIENT MATCH ----
         if norm_name(row[1]) != client_key:
             continue
 
-        # Meal fields
+        # ---- SAFE COLUMN ACCESS ----
         def get_cell(idx):
             return str(row[idx]).strip() if idx < len(row) else ""
-        
+
         opt1 = get_cell(7)
         opt2 = get_cell(8)
         brk  = get_cell(9)
@@ -321,6 +326,7 @@ def count_usage(session: AuthorizedSession, spid: str, start: date, end: date, c
 
         meal_count_this_row = 0
 
+        # ---- MEAL COUNTING ----
         if opt1 and opt1 != "N/A":
             totals["meal1"] += 1
             meal_count_this_row += 1
@@ -352,16 +358,15 @@ def count_usage(session: AuthorizedSession, spid: str, start: date, end: date, c
         if meal_count_this_row > 0:
             active_days_set.add(row_date)
 
-        # Delivery logic
-        delivery_type = str(row[3]).strip()
-        delivery_price = parse_float(row[5]) if len(row) > 5 else 0.0
+        # ---- DELIVERY RATE LEARNING ----
+        delivery_price = parse_float(get_cell(5))
         if delivery_price:
             delivery_rates.append(delivery_price)
 
     active_days = len(active_days_set)
 
-    # Paused days = days in billing range with no activity
-    for d in all_dates:
+    # Paused days = service dates with no activity
+    for d in all_service_dates:
         if d not in active_days_set:
             paused_dates.append(d)
 
@@ -370,20 +375,10 @@ def count_usage(session: AuthorizedSession, spid: str, start: date, end: date, c
     totals["meals_total"] = totals["meal1"] + totals["meal2"]
     totals["juices_total"] = totals["j1"] + totals["j2"]
 
-    # Learn delivery per day (take max seen)
     if delivery_rates:
         last_per_day_delivery = max(delivery_rates)
 
     return totals, active_days, paused_days, total_days, paused_dates, last_per_day_delivery
-
-def next_service_calendar_dates(after_day: date, needed: int) -> List[date]:
-    out: List[date] = []
-    cur = after_day + timedelta(days=1)
-    while len(out) < needed:
-        if cur.weekday() != 6:  # Sunday=6
-            out.append(cur)
-        cur += timedelta(days=1)
-    return out
 
 def get_prev_cycle_for_client(session: AuthorizedSession, spid: str, client_name: str) -> Tuple[Optional[date], Optional[date], Optional[int]]:
     vals = fetch_values(session, spid, f"{BILLING_TAB}!A1:C10000")
