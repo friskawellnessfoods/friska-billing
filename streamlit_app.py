@@ -249,117 +249,109 @@ def count_usage(session: AuthorizedSession, spid: str, start: date, end: date, c
 
     totals = dict(meal1=0, meal2=0, snack=0, j1=0, j2=0, brk=0, seafood=0)
     total_days = 0
-    active_days = 0
+    active_days_set = set()
     paused_dates: List[date] = []
     last_per_day_delivery = 0.0
 
-    for (yy, mm) in month_span_inclusive(start, end):
-        month_name = calendar.month_name[mm]
-        sheet_title, _ = get_clientlist_sheet_title(session, spid, month_name)
-        if not sheet_title:
+    # Fetch full Orders_Output sheet
+    data = fetch_values(session, spid, "Orders_Output!A2:M20000")
+    if not data:
+        return totals, 0, 0, 0, [], 0.0
+
+    # Build full date range (inclusive)
+    cur = start
+    all_dates = []
+    while cur <= end:
+        if cur.weekday() != 6:  # Exclude Sundays
+            all_dates.append(cur)
+        cur += timedelta(days=1)
+
+    total_days = len(all_dates)
+
+    # Track delivery per day from Meal Type column
+    delivery_rates = []
+
+    for row in data:
+        if len(row) < 13:
             continue
 
-        data = fetch_values(session, spid, f"{sheet_title}!A1:ZZ2000")
-        if not data:
+        dt = to_dt(row[0])
+        if not dt:
             continue
 
-        # Map rows by client
-        rows_by_client = {}
-        for r, row in enumerate(data):
-            nm = norm_name(row[COL_B_CLIENT]) if len(row) > COL_B_CLIENT else ""
-            if nm:
-                rows_by_client.setdefault(nm, []).append(r)
+        row_date = dt.date()
 
-        client_rows = rows_by_client.get(client_key, [])
-        if not client_rows:
+        if not (start <= row_date <= end):
             continue
 
-        header_row = data[0]
+        if row_date.weekday() == 6:
+            continue
 
-        # 🔍 Detect structure dynamically
-        first_date_col, delivery_col = detect_clientlist_structure(header_row)
+        if norm_name(row[1]) != client_key:
+            continue
 
-        date_to_block = {}
-        header_dates = []
+        # Meal fields
+        opt1 = str(row[7]).strip()
+        opt2 = str(row[8]).strip()
+        brk  = str(row[9]).strip()
+        snk  = str(row[10]).strip()
+        j1   = str(row[11]).strip()
+        j2   = str(row[12]).strip()
 
-        c = first_date_col
-        while c < len(header_row):
-            dt = to_dt(header_row[c])
-            if not dt:
-                break
+        meal_count_this_row = 0
 
-            d = dt.date()
-            date_to_block[d] = c
-            if start <= d <= end:
-                header_dates.append(d)
+        if opt1 and opt1 != "N/A":
+            totals["meal1"] += 1
+            meal_count_this_row += 1
+            if norm_name(opt1) == "seafood 1":
+                totals["seafood"] += 1
 
-            c += COLUMNS_PER_BLOCK
+        if opt2 and opt2 != "N/A":
+            totals["meal2"] += 1
+            meal_count_this_row += 1
+            if norm_name(opt2) == "seafood 2":
+                totals["seafood"] += 1
 
-        # 🚚 Delivery calculation
-        per_day_delivery, _, _ = compute_delivery_per_day_for_rows(
-            client_rows,
-            data,
-            delivery_col
-        )
-        if per_day_delivery:
-            last_per_day_delivery = per_day_delivery
+        if brk and brk != "N/A":
+            totals["brk"] += 1
+            meal_count_this_row += 1
 
-        service_days_this_month = 0
+        if snk and snk != "N/A":
+            totals["snack"] += 1
+            meal_count_this_row += 1
 
-        for d in header_dates:
-            block = date_to_block.get(d)
-            if block is None:
-                continue
+        if j1 and j1 != "N/A":
+            totals["j1"] += 1
+            meal_count_this_row += 1
 
-            m1 = m2 = sn = j1 = j2 = bk = sf = 0
+        if j2 and j2 != "N/A":
+            totals["j2"] += 1
+            meal_count_this_row += 1
 
-            for r in client_rows:
-                row = data[r]
+        if meal_count_this_row > 0:
+            active_days_set.add(row_date)
 
-                def cell(ci):
-                    return row[ci] if ci < len(row) else ""
+        # Delivery logic
+        delivery_type = str(row[3]).strip()
+        delivery_price = parse_float(row[5]) if len(row) > 5 else 0.0
+        if delivery_price:
+            delivery_rates.append(delivery_price)
 
-                v1 = str(cell(block)).strip()
-                v2 = str(cell(block + 1)).strip()
+    active_days = len(active_days_set)
 
-                if v1:
-                    m1 += 1
-                    if norm_name(v1) == "seafood 1":
-                        sf += 1
+    # Paused days = days in billing range with no activity
+    for d in all_dates:
+        if d not in active_days_set:
+            paused_dates.append(d)
 
-                if v2:
-                    m2 += 1
-                    if norm_name(v2) == "seafood 2":
-                        sf += 1
-
-                if str(cell(block + 2)).strip():
-                    sn += 1
-                if str(cell(block + 3)).strip():
-                    j1 += 1
-                if str(cell(block + 4)).strip():
-                    j2 += 1
-                if str(cell(block + 5)).strip():
-                    bk += 1
-
-            if (m1 + m2 + sn + j1 + j2 + bk) > 0:
-                service_days_this_month += 1
-            else:
-                paused_dates.append(d)
-
-            totals["meal1"] += m1
-            totals["meal2"] += m2
-            totals["snack"] += sn
-            totals["j1"] += j1
-            totals["j2"] += j2
-            totals["brk"] += bk
-            totals["seafood"] += sf
-
-        total_days += len(header_dates)
-        active_days += service_days_this_month
+    paused_days = len(paused_dates)
 
     totals["meals_total"] = totals["meal1"] + totals["meal2"]
     totals["juices_total"] = totals["j1"] + totals["j2"]
-    paused_days = max(0, total_days - active_days)
+
+    # Learn delivery per day (take max seen)
+    if delivery_rates:
+        last_per_day_delivery = max(delivery_rates)
 
     return totals, active_days, paused_days, total_days, paused_dates, last_per_day_delivery
 
