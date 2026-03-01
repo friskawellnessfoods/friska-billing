@@ -273,6 +273,8 @@ def count_usage(session: AuthorizedSession, spid: str, start: date, end: date, c
 
     # Fetch full Orders_Output sheet
     data = fetch_values(session, spid, "Orders_Output!A2:M20000")
+    st.write("First 5 rows raw:", data[:5])
+    st.write("Total rows fetched:", len(data))
     if not data:
         return totals, 0, 0, 0, [], 0.0
 
