@@ -577,7 +577,7 @@ def compute_from_range(client_name: str, prev_start: date, prev_end: date):
         return
     
     future_needed = needed_adjust + needed_bill
-future_dates  = next_service_calendar_dates(resume_date - timedelta(days=1), future_needed)
+    future_dates  = next_service_calendar_dates(resume_date - timedelta(days=1), future_needed)
     bill_dates    = future_dates[needed_adjust:needed_adjust+needed_bill]
     next_start = bill_dates[0] if bill_dates else None
     next_end   = bill_dates[-1] if bill_dates else None
