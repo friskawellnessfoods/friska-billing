@@ -380,6 +380,36 @@ def count_usage(session: AuthorizedSession, spid: str, start: date, end: date, c
 
     return totals, active_days, paused_days, total_days, paused_dates, last_per_day_delivery
 
+def find_resume_date(session, spid, client_name, after_date, max_days=90):
+    client_key = norm_name(client_name)
+    data = fetch_values(session, spid, "Orders_Output!A2:M")
+
+    limit_date = after_date + timedelta(days=max_days)
+
+    for row in data:
+        if not row or len(row) < 2:
+            continue
+
+        dt = to_dt(row[0])
+        if not dt:
+            continue
+
+        d = dt.date()
+
+        if not (after_date < d <= limit_date):
+            continue
+
+        if norm_name(row[1]) != client_key:
+            continue
+
+        # any activity counts
+        for idx in [7,8,9,10,11,12]:
+            if idx < len(row):
+                val = str(row[idx]).strip()
+                if val and val != "N/A":
+                    return d
+
+    return None
 def get_prev_cycle_for_client(session: AuthorizedSession, spid: str, client_name: str) -> Tuple[Optional[date], Optional[date], Optional[int]]:
     vals = fetch_values(session, spid, f"{BILLING_TAB}!A1:C10000")
     if not vals or len(vals) < 2:
@@ -540,8 +570,14 @@ def compute_from_range(client_name: str, prev_start: date, prev_end: date):
     totals, active_days, paused_days, total_days, paused_dates, learned_delivery = count_usage(session, spid, prev_start, prev_end, client_name)
     needed_adjust = paused_days
     needed_bill   = 26
+    resume_date = find_resume_date(session, spid, client_name, prev_end)
+
+    if not resume_date:
+        st.warning("⚠ Client has not resumed for next 90 days.")
+        return
+    
     future_needed = needed_adjust + needed_bill
-    future_dates  = next_service_calendar_dates(prev_end, future_needed)
+future_dates  = next_service_calendar_dates(resume_date - timedelta(days=1), future_needed)
     bill_dates    = future_dates[needed_adjust:needed_adjust+needed_bill]
     next_start = bill_dates[0] if bill_dates else None
     next_end   = bill_dates[-1] if bill_dates else None
