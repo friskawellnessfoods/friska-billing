@@ -614,6 +614,34 @@ def compute_from_range(client_name: str, prev_start: date, prev_end: date):
     )
     needed_adjust = paused_days
     needed_bill   = 26
+    
+    # If there are no paused days, skip adjustment logic
+    if needed_adjust == 0:
+        future_dates = next_service_calendar_dates(resume_date - timedelta(days=1), needed_bill)
+    
+        next_start = future_dates[0]
+        next_end = future_dates[-1]
+    
+        st.session_state.update({
+            "adjust_dates": [],
+            "fetched": True,
+            "client": client_name,
+            "prev_start": prev_start,
+            "prev_end": prev_end,
+            "next_start": next_start,
+            "next_end": next_end,
+            "delivery_per_day": learned_delivery or st.session_state.get("delivery_per_day", 0.0),
+            "totals": totals,
+            "active_days": active_days,
+            "paused_days": paused_days,
+            "total_days": total_days,
+            "paused_dates": paused_dates,
+            "q_meals": 26,
+            "q_delivdays": active_days,
+            "rate_deliv": learned_delivery or 0.0,
+        })
+    
+        return
     today = date.today()
 
     # If billing end is today or future, assume resume next service day
