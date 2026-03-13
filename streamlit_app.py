@@ -635,8 +635,13 @@ def compute_from_range(client_name: str, prev_start: date, prev_end: date):
     )
     
     if len(adjust_dates) < needed_adjust:
-        st.warning("⚠ Could not find enough active days for pause adjustment.")
-        return
+        remaining = needed_adjust - len(adjust_dates)
+    
+        start_from = adjust_dates[-1] if adjust_dates else resume_date
+    
+        extra_days = next_service_calendar_dates(start_from, remaining)
+    
+        adjust_dates = adjust_dates + extra_days
     
     adjust_end = adjust_dates[-1]
     
