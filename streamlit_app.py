@@ -570,11 +570,17 @@ def compute_from_range(client_name: str, prev_start: date, prev_end: date):
     totals, active_days, paused_days, total_days, paused_dates, learned_delivery = count_usage(session, spid, prev_start, prev_end, client_name)
     needed_adjust = paused_days
     needed_bill   = 26
-    resume_date = find_resume_date(session, spid, client_name, prev_end)
+    today = date.today()
 
-    if not resume_date:
-        st.warning("⚠ Client has not resumed for next 90 days.")
-        return
+    # If billing end is today or future, assume resume next service day
+    if prev_end >= today:
+        resume_date = prev_end + timedelta(days=1)
+    else:
+        resume_date = find_resume_date(session, spid, client_name, prev_end)
+    
+        if not resume_date:
+            st.warning("⚠ Client has not resumed for next 90 days.")
+            return
     
     future_needed = needed_adjust + needed_bill
     future_dates  = next_service_calendar_dates(resume_date - timedelta(days=1), future_needed)
