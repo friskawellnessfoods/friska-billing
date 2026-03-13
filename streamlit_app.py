@@ -718,7 +718,9 @@ with mid:
             f"- **Total days:** {st.session_state['total_days']}",
         ]
         st.markdown("\n".join(lines))
-        st.markdown("**Paused dates:** " + (", ".join(sorted({d.strftime('%d-%b-%Y') for d in st.session_state['paused_dates']})) if st.session_state['paused_dates'] else "None"))
+        paused = sorted(st.session_state['paused_dates'])
+        paused_text = ", ".join(dtstr(d) for d in paused) if paused else "None"
+        st.markdown("**Paused dates:** " + paused_text)
 
         st.markdown("#### Next Cycle Planner")
         adj_needed = st.session_state['paused_days']
