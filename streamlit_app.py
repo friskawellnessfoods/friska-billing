@@ -410,6 +410,40 @@ def find_resume_date(session, spid, client_name, after_date, max_days=90):
                     return d
 
     return None
+
+def find_next_active_dates(session, spid, client_name, start_date, needed):
+    client_key = norm_name(client_name)
+    data = fetch_values(session, spid, "Orders_Output!A2:M")
+
+    rows_with_dates = []
+
+    for row in data:
+        if not row or len(row) < 2:
+            continue
+
+        dt = to_dt(row[0])
+        if not dt:
+            continue
+
+        d = dt.date()
+
+        if d < start_date:
+            continue
+
+        if norm_name(row[1]) != client_key:
+            continue
+
+        # check activity
+        for idx in [7,8,9,10,11,12]:
+            if idx < len(row):
+                val = str(row[idx]).strip()
+                if val and val != "N/A":
+                    rows_with_dates.append(d)
+                    break
+
+    rows_with_dates = sorted(set(rows_with_dates))
+
+    return rows_with_dates[:needed]
 def get_prev_cycle_for_client(session: AuthorizedSession, spid: str, client_name: str) -> Tuple[Optional[date], Optional[date], Optional[int]]:
     vals = fetch_values(session, spid, f"{BILLING_TAB}!A1:C10000")
     if not vals or len(vals) < 2:
@@ -592,12 +626,27 @@ def compute_from_range(client_name: str, prev_start: date, prev_end: date):
             st.warning("⚠ Client has not resumed for next 90 days.")
             return
     
-    future_needed = needed_adjust + needed_bill
-    future_dates  = next_service_calendar_dates(resume_date - timedelta(days=1), future_needed)
-    bill_dates    = future_dates[needed_adjust:needed_adjust+needed_bill]
+    adjust_dates = find_next_active_dates(
+        session,
+        spid,
+        client_name,
+        resume_date,
+        needed_adjust
+    )
+    
+    if len(adjust_dates) < needed_adjust:
+        st.warning("⚠ Could not find enough active days for pause adjustment.")
+        return
+    
+    adjust_end = adjust_dates[-1]
+    
+    future_dates = next_service_calendar_dates(adjust_end, needed_bill)
+    
+    bill_dates = future_dates[:needed_bill]
     next_start = bill_dates[0] if bill_dates else None
     next_end   = bill_dates[-1] if bill_dates else None
     st.session_state.update({
+        "adjust_dates": adjust_dates,
         "fetched": True, "client": client_name,
         "prev_start": prev_start, "prev_end": prev_end,
         "next_start": next_start, "next_end": next_end,
@@ -673,7 +722,7 @@ with mid:
             f"- **Paused days to adjust:** {adj_needed}",
         ]
         if adj_needed:
-            adj_dates = next_service_calendar_dates(st.session_state['prev_end'], adj_needed)
+            adj_dates = st.session_state.get("adjust_dates", [])
             notes.append("- **Adjustment dates:** " + ", ".join(dtstr(d) for d in adj_dates))
         else:
             notes.append("- **Adjustment dates:** None")
