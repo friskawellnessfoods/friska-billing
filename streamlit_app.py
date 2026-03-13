@@ -569,8 +569,11 @@ def next_service_calendar_dates(after_day: date, needed: int) -> List[date]:
 def compute_from_range(client_name: str, prev_start: date, prev_end: date):
     today = date.today()
 
-    # Do not count future days when calculating pauses
-    calc_end = prev_end if prev_end <= today else today
+    if prev_end > today:
+        st.info(f"ℹ Subscription is still active until {dtstr(prev_end)}. Paused days calculated only up to today.")
+        calc_end = today
+    else:
+        calc_end = prev_end
     
     totals, active_days, paused_days, total_days, paused_dates, learned_delivery = count_usage(
         session, spid, prev_start, calc_end, client_name
