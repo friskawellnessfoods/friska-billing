@@ -601,6 +601,11 @@ def next_service_calendar_dates(after_day: date, needed: int) -> List[date]:
     return out
     
 def compute_from_range(client_name: str, prev_start: date, prev_end: date):
+
+    # reset previous results
+    st.session_state["fetched"] = False
+    st.session_state["adjust_dates"] = []
+
     today = date.today()
 
     if prev_end > today:
@@ -615,12 +620,22 @@ def compute_from_range(client_name: str, prev_start: date, prev_end: date):
     needed_adjust = paused_days
     needed_bill   = 26
     
-    # If there are no paused days, skip adjustment logic
+    # Determine resume date FIRST
+    if prev_end >= today:
+        resume_date = prev_end + timedelta(days=1)
+    else:
+        resume_date = find_resume_date(session, spid, client_name, prev_end)
+    
+        if not resume_date:
+            resume_date = prev_end + timedelta(days=1)
+    
+    # If there are no paused days skip adjustment
     if needed_adjust == 0:
+    
         future_dates = next_service_calendar_dates(resume_date - timedelta(days=1), needed_bill)
     
         next_start = future_dates[0]
-        next_end = future_dates[-1]
+        next_end   = future_dates[-1]
     
         st.session_state.update({
             "adjust_dates": [],
@@ -642,17 +657,6 @@ def compute_from_range(client_name: str, prev_start: date, prev_end: date):
         })
     
         return
-    today = date.today()
-
-    # If billing end is today or future, assume resume next service day
-    if prev_end >= today:
-        resume_date = prev_end + timedelta(days=1)
-    else:
-        resume_date = find_resume_date(session, spid, client_name, prev_end)
-    
-        if not resume_date:
-            st.warning("⚠ Client has not resumed for next 90 days.")
-            return
     
     adjust_dates = find_next_active_dates(
         session,
@@ -671,7 +675,7 @@ def compute_from_range(client_name: str, prev_start: date, prev_end: date):
     
         adjust_dates = adjust_dates + extra_days
     
-    adjust_end = adjust_dates[-1]
+    adjust_end = adjust_dates[-1] if adjust_dates else resume_date
     
     future_dates = next_service_calendar_dates(adjust_end, needed_bill)
     
