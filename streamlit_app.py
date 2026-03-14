@@ -262,7 +262,7 @@ def compute_delivery_per_day_for_rows(
         return (sum(prices) if prices else 0.0), "sum_shifts", []
     return (max(prices) if prices else 0.0), "single_mismatch", []
 
-def count_usage(session: AuthorizedSession, spid: str, start: date, end: date, client_name: str):
+def count_usage(data, start: date, end: date, client_name: str):
     client_key = norm_name(client_name)
 
     totals = dict(meal1=0, meal2=0, snack=0, j1=0, j2=0, brk=0, seafood=0)
@@ -271,7 +271,6 @@ def count_usage(session: AuthorizedSession, spid: str, start: date, end: date, c
     last_per_day_delivery = 0.0
 
     # Fetch full Orders_Output sheet (no row limit)
-    data = fetch_values(session, spid, "Orders_Output!A2:M")
 
     if not data:
         return totals, 0, 0, 0, [], 0.0
@@ -380,9 +379,8 @@ def count_usage(session: AuthorizedSession, spid: str, start: date, end: date, c
 
     return totals, active_days, paused_days, total_days, paused_dates, last_per_day_delivery
 
-def find_resume_date(session, spid, client_name, after_date, max_days=90):
+def find_resume_date(data, client_name, after_date, max_days=90):
     client_key = norm_name(client_name)
-    data = fetch_values(session, spid, "Orders_Output!A2:M")
 
     limit_date = after_date + timedelta(days=max_days)
 
@@ -411,9 +409,8 @@ def find_resume_date(session, spid, client_name, after_date, max_days=90):
 
     return None
 
-def find_next_active_dates(session, spid, client_name, start_date, needed):
+def find_next_active_dates(data, client_name, start_date, needed):
     client_key = norm_name(client_name)
-    data = fetch_values(session, spid, "Orders_Output!A2:M")
 
     rows_with_dates = []
 
@@ -606,6 +603,8 @@ def compute_from_range(client_name: str, prev_start: date, prev_end: date):
     st.session_state["fetched"] = False
     st.session_state["adjust_dates"] = []
 
+    orders_data = fetch_values(session, spid, "Orders_Output!A2:M")
+
     today = date.today()
 
     if prev_end > today:
@@ -615,7 +614,7 @@ def compute_from_range(client_name: str, prev_start: date, prev_end: date):
         calc_end = prev_end
     
     totals, active_days, paused_days, total_days, paused_dates, learned_delivery = count_usage(
-        session, spid, prev_start, calc_end, client_name
+        orders_data, prev_start, calc_end, client_name
     )
     needed_adjust = paused_days
     needed_bill   = 26
@@ -624,7 +623,7 @@ def compute_from_range(client_name: str, prev_start: date, prev_end: date):
     if prev_end >= today:
         resume_date = prev_end + timedelta(days=1)
     else:
-        resume_date = find_resume_date(session, spid, client_name, prev_end)
+        resume_date = find_resume_date(orders_data, client_name, prev_end)
     
         if not resume_date:
             resume_date = prev_end + timedelta(days=1)
@@ -659,8 +658,7 @@ def compute_from_range(client_name: str, prev_start: date, prev_end: date):
         return
     
     adjust_dates = find_next_active_dates(
-        session,
-        spid,
+        orders_data,
         client_name,
         resume_date,
         needed_adjust
