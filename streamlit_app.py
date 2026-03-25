@@ -802,8 +802,8 @@ with mid:
         else:
             notes.append("- **Adjustment dates:** None")
         notes += [
-            f"- **New bill start:** {dtstr(st.session_state['next_start'])}",
-            f"- **New bill end:** {dtstr(st.session_state['next_end'])}",
+            f"- **New bill start:** {dtstr(st.session_state['next_start']) if st.session_state['next_start'] else 'Not available'}",
+            f"- **New bill end:** {dtstr(st.session_state['next_end']) if st.session_state['next_end'] else 'Not available'}",
         ]
         st.markdown("\n".join(notes))
 
