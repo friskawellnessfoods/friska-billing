@@ -267,6 +267,7 @@ def count_usage(data, start: date, end: date, client_name: str):
 
     totals = dict(meal1=0, meal2=0, snack=0, j1=0, j2=0, brk=0, seafood=0)
     active_days_set = set()
+    last_active_date = None
     paused_dates: List[date] = []
     last_per_day_delivery = 0.0
 
@@ -356,7 +357,9 @@ def count_usage(data, start: date, end: date, client_name: str):
 
         if meal_count_this_row > 0:
             active_days_set.add(row_date)
-
+            if not last_active_date or row_date > last_active_date:
+                last_active_date = row_date
+        
         # ---- DELIVERY RATE LEARNING ----
         delivery_price = parse_float(get_cell(5))
         if delivery_price:
@@ -377,7 +380,7 @@ def count_usage(data, start: date, end: date, client_name: str):
     if delivery_rates:
         last_per_day_delivery = max(delivery_rates)
 
-    return totals, active_days, paused_days, total_days, paused_dates, last_per_day_delivery
+    return totals, active_days, paused_days, total_days, paused_dates, last_per_day_delivery, last_active_date
 
 def find_resume_date(data, client_name, after_date, max_days=90):
     client_key = norm_name(client_name)
@@ -613,7 +616,7 @@ def compute_from_range(client_name: str, prev_start: date, prev_end: date):
     else:
         calc_end = prev_end
     
-    totals, active_days, paused_days, total_days, paused_dates, learned_delivery = count_usage(
+    totals, active_days, paused_days, total_days, paused_dates, learned_delivery, last_active_date = count_usage(
         orders_data, prev_start, calc_end, client_name
     )
     needed_adjust = paused_days
@@ -653,6 +656,7 @@ def compute_from_range(client_name: str, prev_start: date, prev_end: date):
             "q_meals": 26,
             "q_delivdays": active_days,
             "rate_deliv": learned_delivery or 0.0,
+            "last_active_date": last_active_date,
         })
     
         return
@@ -748,6 +752,17 @@ with mid:
             f"- **Total days:** {st.session_state['total_days']}",
         ]
         st.markdown("\n".join(lines))
+        last_meal = st.session_state.get("last_active_date")
+        prev_end = st.session_state.get("prev_end")
+
+        if last_meal and prev_end and last_meal < prev_end:
+            pause_start = last_meal + timedelta(days=1)
+        
+            st.warning(
+                f"⚠ Last meal taken on **{dtstr(last_meal)}**. "
+                f"Subscription paused since **{dtstr(pause_start)}**. "
+                f"Client has not resumed meals yet."
+            )
         paused = sorted(st.session_state['paused_dates'])
         paused_text = ", ".join(dtstr(d) for d in paused) if paused else "None"
         st.markdown("**Paused dates:** " + paused_text)
