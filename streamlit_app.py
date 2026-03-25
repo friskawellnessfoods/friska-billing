@@ -667,6 +667,29 @@ def compute_from_range(client_name: str, prev_start: date, prev_end: date):
         resume_date,
         needed_adjust
     )
+
+    # If client never resumed meals after billing end
+    if not adjust_dates and last_active_date and last_active_date < prev_end:
+        st.session_state.update({
+            "adjust_dates": [],
+            "fetched": True,
+            "client": client_name,
+            "prev_start": prev_start,
+            "prev_end": prev_end,
+            "next_start": None,
+            "next_end": None,
+            "delivery_per_day": learned_delivery or st.session_state.get("delivery_per_day", 0.0),
+            "totals": totals,
+            "active_days": active_days,
+            "paused_days": paused_days,
+            "total_days": total_days,
+            "paused_dates": paused_dates,
+            "last_active_date": last_active_date,
+            "q_meals": 26,
+            "q_delivdays": active_days,
+            "rate_deliv": learned_delivery or 0.0,
+        })
+        return
     
     if len(adjust_dates) < needed_adjust:
         remaining = needed_adjust - len(adjust_dates)
