@@ -605,6 +605,7 @@ def compute_from_range(client_name: str, prev_start: date, prev_end: date):
     # reset previous results
     st.session_state["fetched"] = False
     st.session_state["adjust_dates"] = []
+    st.session_state["last_active_date"] = None
 
     orders_data = fetch_values(session, spid, "Orders_Output!A2:M")
 
