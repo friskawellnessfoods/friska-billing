@@ -267,6 +267,8 @@ def count_usage(data, start: date, end: date, client_name: str):
 
     totals = dict(meal1=0, meal2=0, snack=0, j1=0, j2=0, brk=0, seafood=0)
     active_days_set = set()
+    slot_counts = {}
+    last_active_date = None
     last_active_date = None
     paused_dates: List[date] = []
     last_per_day_delivery = 0.0
@@ -357,6 +359,15 @@ def count_usage(data, start: date, end: date, client_name: str):
 
         if meal_count_this_row > 0:
             active_days_set.add(row_date)
+        
+            slot = str(row[5]).strip() if len(row) > 5 else ""
+        
+            # old data may not have slot
+            if not slot:
+                slot = "No Delivery Slot"
+        
+            slot_counts[slot] = slot_counts.get(slot, 0) + 1
+        
             if not last_active_date or row_date > last_active_date:
                 last_active_date = row_date
         
@@ -380,7 +391,7 @@ def count_usage(data, start: date, end: date, client_name: str):
     if delivery_rates:
         last_per_day_delivery = max(delivery_rates)
 
-    return totals, active_days, paused_days, total_days, paused_dates, last_per_day_delivery, last_active_date
+    return totals, active_days, paused_days, total_days, paused_dates, last_per_day_delivery, last_active_date, slot_counts
 
 def find_resume_date(data, client_name, after_date, max_days=90):
     client_key = norm_name(client_name)
@@ -617,7 +628,7 @@ def compute_from_range(client_name: str, prev_start: date, prev_end: date):
     else:
         calc_end = prev_end
     
-    totals, active_days, paused_days, total_days, paused_dates, learned_delivery, last_active_date = count_usage(
+    totals, active_days, paused_days, total_days, paused_dates, learned_delivery, last_active_date, slot_counts = count_usage(
         orders_data, prev_start, calc_end, client_name
     )
     needed_adjust = paused_days
@@ -683,6 +694,7 @@ def compute_from_range(client_name: str, prev_start: date, prev_end: date):
             "totals": totals,
             "active_days": active_days,
             "paused_days": paused_days,
+            "slot_counts": slot_counts,
             "total_days": total_days,
             "paused_dates": paused_dates,
             "last_active_date": last_active_date,
@@ -717,6 +729,7 @@ def compute_from_range(client_name: str, prev_start: date, prev_end: date):
         "totals": totals, "active_days": active_days,
         "paused_days": paused_days, "total_days": total_days,
         "paused_dates": paused_dates,
+        "slot_counts": slot_counts,
         # sensible Admin defaults
         "q_meals": 26,
         "q_delivdays": active_days,
@@ -764,7 +777,12 @@ with mid:
     if st.session_state["fetched"]:
         totals = st.session_state["totals"]
         st.markdown("#### Usage Summary")
-        lines = [f"- **Meals total:** {totals.get('meals_total',0)}"]
+        slot_counts = st.session_state.get("slot_counts", {})
+
+        if slot_counts:
+            lines.append("- **Slot deliveries:**")
+            for slot, count in sorted(slot_counts.items()):
+                lines.append(f"   - {slot}: {count}")
         if totals.get("seafood",0)>0: lines.append(f"- **Seafood add-on (count):** {totals['seafood']}")
         if totals.get("snack",0)>0:   lines.append(f"- **Snacks total:** {totals['snack']}")
         if totals.get("juices_total",0)>0:
