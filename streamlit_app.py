@@ -269,7 +269,6 @@ def count_usage(data, start: date, end: date, client_name: str):
     active_days_set = set()
     slot_counts = {}
     last_active_date = None
-    last_active_date = None
     paused_dates: List[date] = []
     last_per_day_delivery = 0.0
 
@@ -777,8 +776,10 @@ with mid:
     if st.session_state["fetched"]:
         totals = st.session_state["totals"]
         st.markdown("#### Usage Summary")
-        slot_counts = st.session_state.get("slot_counts", {})
+        lines = [f"- **Meals total:** {totals.get('meals_total',0)}"]
 
+        slot_counts = st.session_state.get("slot_counts", {})
+        
         if slot_counts:
             lines.append("- **Slot deliveries:**")
             for slot, count in sorted(slot_counts.items()):
